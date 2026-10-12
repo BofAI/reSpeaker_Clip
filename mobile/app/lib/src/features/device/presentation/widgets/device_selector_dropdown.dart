@@ -46,7 +46,11 @@ class _DeviceSelectorDropdownState
     // device the app isn't actually using.
     final effectiveDeviceId = currentDeviceId ?? deviceState.lastConnectedDeviceId;
 
+    // Battery notifies and other DB writes reload this provider. Without
+    // skipLoadingOnReload the header drops to the empty/loading pill on every
+    // reload, so the name and battery slot jump.
     return devicesAsync.when(
+      skipLoadingOnReload: true,
       loading: () => _buildHeader(
         context,
         null,
@@ -154,25 +158,19 @@ class _DeviceSelectorDropdownState
                       if (isOnline)
                         SizedBox(
                           width: _kHeaderBatterySlotWidth,
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 180),
-                            switchInCurve: Curves.easeOut,
-                            switchOutCurve: Curves.easeIn,
-                            child: Text(
-                              battery != null ? '$battery%' : '--',
-                              key: ValueKey<int?>(battery),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              textAlign: TextAlign.right,
-                              style: Theme.of(context)
-                                  .textTheme
-                                  .bodySmall
-                                  ?.copyWith(
-                                    color: AppColors.textSecondary,
-                                    fontWeight: FontWeight.w500,
-                                    fontSize: AppTypography.s12,
-                                  ),
-                            ),
+                          child: Text(
+                            battery != null ? '$battery%' : '--',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.right,
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(
+                                  color: AppColors.textSecondary,
+                                  fontWeight: FontWeight.w500,
+                                  fontSize: AppTypography.s12,
+                                ),
                           ),
                         ),
                       if (isOnline && hasAnyDevice) const SizedBox(width: 4),

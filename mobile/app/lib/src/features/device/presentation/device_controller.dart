@@ -2768,6 +2768,10 @@ class DeviceController extends Notifier<DeviceUiState> {
   /// While non-null, suppress auto-reconnect for this device (unbind / pair reset).
   String? _unbindInProgressFor;
 
+  /// Firmware OTA owns the BLE/SMP link. AT keepalive / auto-reconnect would
+  /// race mcumgr and look like the app "gave up" after a short no-response wait.
+  bool _firmwareOtaHold = false;
+
   /// Last successful connection time, for auto-reconnect in the "recently connected" case (also when idle, not only during recording/transfer).
   DateTime? _lastConnectedAt;
 
@@ -3266,7 +3270,9 @@ class DeviceController extends Notifier<DeviceUiState> {
     ref.listen<AsyncValue<DeviceRepository>>(
       deviceRepositoryProvider,
       (_, next) {
-        next.whenData((_) => unawaited(_persistConnectedOnline()));
+        // fireImmediately runs inside this build(), before the notifier state
+        // exists. Reading `state` here throws "uninitialized provider".
+        next.whenData((_) => _persistConnectedOnlineAfterBuild());
       },
       fireImmediately: true,
     );
@@ -3586,6 +3592,7 @@ class DeviceController extends Notifier<DeviceUiState> {
       await _batterySub?.cancel();
       final batteryStream = conn.batteryLevelStream;
       if (batteryStream != null) {
+        var lastPersistedPercent = -1;
         _batterySub = batteryStream.listen((percent) async {
           // Stale-link guard: this same closure is preserved on demote (its
           // subscription is transferred to a [_BackgroundLink]), so it keeps
@@ -3601,6 +3608,9 @@ class DeviceController extends Notifier<DeviceUiState> {
               state.connection?.device.remoteId.toString() == id;
           final stillBackground = _backgrounds.containsKey(id);
           if (!stillForeground && !stillBackground) return;
+          // Identical notifies are common. Rewriting the row bumps
+          // devicesListProvider and the home header reloads on every one.
+          if (percent == lastPersistedPercent) return;
           try {
             final repo = await ref.read(deviceRepositoryProvider.future);
             await repo.updateStatus(
@@ -3608,6 +3618,7 @@ class DeviceController extends Notifier<DeviceUiState> {
               isOnline: true,
               batteryPercent: percent,
             );
+            lastPersistedPercent = percent;
             _bumpDeviceDbRevision();
           } catch (_) {}
         });
@@ -3640,6 +3651,7 @@ class DeviceController extends Notifier<DeviceUiState> {
                   const Duration(seconds: 90);
           final unbinding = _unbindInProgressFor == discDeviceId;
           final willReconnect = !unbinding &&
+              !_firmwareOtaHold &&
               (hadRecording || hadTransfer || recentlyConnected) &&
               state.lastConnectedDeviceId != null &&
               !_disposed;
@@ -4200,6 +4212,44 @@ class DeviceController extends Notifier<DeviceUiState> {
   static const int _reconnectMaxRetries = 3;
   static const Duration _reconnectRetryDelay = Duration(milliseconds: 1500);
 
+  /// Pause AT polling and auto-reconnect while SMP OTA is in flight.
+  void setFirmwareOtaHold(bool hold) {
+    _firmwareOtaHold = hold;
+    AppLog.i('DeviceController.setFirmwareOtaHold: $hold');
+  }
+
+  /// Drop the AT/JSON GATT so mcumgr is the only BLE client during SMP OTA.
+  ///
+  /// nRF Connect never hits the ~10% write timeout because it only talks SMP.
+  /// Our app otherwise keeps flutter_blue_plus on the same peripheral, which
+  /// races the second Central/GATT that `mcumgr_flutter` opens.
+  ///
+  /// Keeps [DeviceUiState.lastConnectedDeviceId] so [kickAutoReconnect] can
+  /// restore AT after the upgrade (or if the user leaves the OTA page).
+  Future<void> releaseAtLinkForFirmwareOta() async {
+    _firmwareOtaHold = true;
+    final conn = state.connection;
+    if (conn == null) {
+      AppLog.i(
+        'DeviceController.releaseAtLinkForFirmwareOta: no AT link to drop',
+      );
+      return;
+    }
+    final id = conn.device.remoteId.toString();
+    AppLog.i('DeviceController.releaseAtLinkForFirmwareOta: dropping AT for $id');
+
+    final stuckTransfer = _transfersByDevice.remove(id);
+    if (stuckTransfer != null) {
+      stuckTransfer.cancelRequested = true;
+      stuckTransfer.waitCompleter?.complete();
+    }
+    _activeTransferRecordingId = null;
+
+    await _tearDownBleWithoutClearingLastDevice(conn);
+    // Let the stack finish GATT teardown before mcumgr connects SMP.
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+  }
+
   /// Drives the global "reconnect" UX: flips [DeviceUiState.reconnectStatus] so the
   /// app-level snackbar shows "reconnecting → success/failed", waits [initialDelay]
   /// (use a longer value for OTA reset where the device needs to reboot first), then
@@ -4209,6 +4259,10 @@ class DeviceController extends Notifier<DeviceUiState> {
     Duration initialDelay = const Duration(milliseconds: 800),
   }) async {
     if (_disposed) return false;
+    if (_firmwareOtaHold) {
+      AppLog.i('DeviceController.kickAutoReconnect: skipped (firmware OTA hold)');
+      return false;
+    }
     if (_unbindInProgressFor != null) {
       AppLog.i(
         'DeviceController.kickAutoReconnect: skipped (unbind in progress for $_unbindInProgressFor)',
@@ -6799,7 +6853,15 @@ class DeviceController extends Notifier<DeviceUiState> {
     }
   }
 
+  void _persistConnectedOnlineAfterBuild() {
+    Future<void>(() {
+      if (_disposed) return;
+      unawaited(_persistConnectedOnline());
+    });
+  }
+
   Future<void> _persistConnectedOnline() async {
+    if (_disposed) return;
     final conn = state.connection;
     if (conn == null) return;
     try {
@@ -6816,6 +6878,7 @@ class DeviceController extends Notifier<DeviceUiState> {
     final conn = state.connection;
     final at = _at;
     if (conn == null || at == null) return null;
+    if (_firmwareOtaHold) return null;
     final deviceId = conn.device.remoteId.toString();
     final repo = await ref.read(deviceRepositoryProvider.future);
 
@@ -9100,18 +9163,21 @@ class DeviceController extends Notifier<DeviceUiState> {
                 deviceTotalFiles: snapshotDeviceTotalFiles,
                 deviceSessionBytes: snapshotDeviceSessionBytes,
               );
+              final progressAt = DateTime.now();
+              final progressExpected = exp ??
+                  (expectedBytes != null && expectedBytes > 0
+                      ? expectedBytes
+                      : null);
               await repo.updateTransfer(
                 id: recordingId,
                 state: 'transferring',
                 progress: prog,
                 receivedBytes: snapshotReceived,
-                expectedBytes: exp ??
-                    (expectedBytes != null && expectedBytes > 0
-                        ? expectedBytes
-                        : null),
-                lastPacketAt: DateTime.now(),
+                expectedBytes: progressExpected,
+                lastPacketAt: progressAt,
                 error: '',
                 errorCode: '',
+                touchUpdatedAt: false,
               );
               final nowInv = DateTime.now();
               final hasExpected = (exp ?? 0) > 0;
@@ -9124,8 +9190,17 @@ class DeviceController extends Notifier<DeviceUiState> {
                       500) {
                 lastProgressInvalidateAt = nowInv;
                 if (prog != null) lastInvalidatedProgress = prog;
-                bumpRecordingsLists(ref);
-                ref.invalidate(recordingByIdProvider(recordingId));
+                publishTransferProgressSnapshot(
+                  ref,
+                  recordingId: recordingId,
+                  transferState: 'transferring',
+                  progress: prog,
+                  receivedBytes: snapshotReceived,
+                  expectedBytes: progressExpected,
+                  lastPacketAt: progressAt,
+                  error: '',
+                  errorCode: '',
+                );
               }
             } catch (e, st) {
               if (_isSqfliteDatabaseClosed(e)) {
@@ -9343,6 +9418,7 @@ class DeviceController extends Notifier<DeviceUiState> {
                       lastPacketAt: DateTime.now(),
                       error: '',
                       errorCode: '',
+                      touchUpdatedAt: false,
                     );
                     bumpRecordingsLists(ref);
                     ref.invalidate(recordingByIdProvider(recordingId));
@@ -9473,6 +9549,7 @@ class DeviceController extends Notifier<DeviceUiState> {
                     lastPacketAt: DateTime.now(),
                     error: '',
                     errorCode: '',
+                    touchUpdatedAt: false,
                   );
                   bumpRecordingsLists(ref);
                   ref.invalidate(recordingByIdProvider(recordingId));
@@ -9629,6 +9706,7 @@ class DeviceController extends Notifier<DeviceUiState> {
                   lastPacketAt: DateTime.now(),
                   error: '',
                   errorCode: '',
+                  touchUpdatedAt: false,
                 );
                 bumpRecordingsLists(ref);
                 ref.invalidate(recordingByIdProvider(recordingId));
@@ -9703,6 +9781,7 @@ class DeviceController extends Notifier<DeviceUiState> {
                   lastPacketAt: DateTime.now(),
                   error: '',
                   errorCode: '',
+                  touchUpdatedAt: false,
                 );
                 bumpRecordingsLists(ref);
                 ref.invalidate(recordingByIdProvider(recordingId));
@@ -9833,6 +9912,7 @@ class DeviceController extends Notifier<DeviceUiState> {
                   lastPacketAt: DateTime.now(),
                   error: '',
                   errorCode: '',
+                  touchUpdatedAt: false,
                 );
                 bumpRecordingsLists(ref);
                 ref.invalidate(recordingByIdProvider(recordingId));
@@ -10166,6 +10246,7 @@ class DeviceController extends Notifier<DeviceUiState> {
                 lastPacketAt: DateTime.now(),
                 error: '',
                 errorCode: '',
+                touchUpdatedAt: false,
               );
               bumpRecordingsLists(ref);
               ref.invalidate(recordingByIdProvider(recordingId));
@@ -11106,6 +11187,7 @@ class DeviceController extends Notifier<DeviceUiState> {
   /// [_kIdleTimeSyncCheckInterval] from [DeviceStatusPoller].
   Future<void> maybeSyncDeviceTimeWhenIdle() async {
     if (_disposed) return;
+    if (_firmwareOtaHold) return;
     final now = DateTime.now();
     if (now.isBefore(_nextIdleTimeSyncCheckAt)) return;
     _nextIdleTimeSyncCheckAt = now.add(_kIdleTimeSyncCheckInterval);

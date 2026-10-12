@@ -75,6 +75,8 @@ class _FirmwareUpdatePageState extends ConsumerState<FirmwareUpdatePage> {
   int _downloadBytesTotal = 0;
   CancelToken? _downloadCancel;
   bool _cloudCheckTriggered = false;
+  /// True after AT GATT was released for this upgrade (reconnect on leave).
+  bool _releasedAtForOta = false;
 
   void _cancelOtaStreams() {
     _otaProgressSub?.cancel();
@@ -88,6 +90,13 @@ class _FirmwareUpdatePageState extends ConsumerState<FirmwareUpdatePage> {
     unawaited(_otaSession?.dispose());
     _downloadCancel?.cancel('FirmwareUpdatePage disposed');
     _otaProgressTarget.dispose();
+    try {
+      final ctrl = ref.read(deviceControllerProvider.notifier);
+      ctrl.setFirmwareOtaHold(false);
+      if (_releasedAtForOta) {
+        unawaited(ctrl.kickAutoReconnect());
+      }
+    } catch (_) {}
     super.dispose();
   }
 
@@ -289,30 +298,15 @@ class _FirmwareUpdatePageState extends ConsumerState<FirmwareUpdatePage> {
       _statusText = '';
       _errorMessage = null;
     });
+    final ctrl = ref.read(deviceControllerProvider.notifier);
+    await ctrl.releaseAtLinkForFirmwareOta();
+    _releasedAtForOta = true;
 
     try {
       final file = File(_selectedFilePath);
-      final session = OtaSession(deviceId: widget.deviceId);
-      _otaSession = session;
-
-      _otaProgressSub = session.events.listen(
-        (p) {
-          if (!mounted) return;
-          if (p.progress >= 0) {
-            _otaProgressTarget.value = p.progress.clamp(0.0, 1.0);
-          } else if (p.phase == OtaPhase.success ||
-              p.phase == OtaPhase.validating ||
-              p.phase == OtaPhase.resetting) {
-            _otaProgressTarget.value = 1.0;
-          }
-          setState(() => _statusText = p.message);
-        },
-        cancelOnError: false,
-      );
-
-      final ok = await session.upgrade(file);
+      final ok = await _upgradeWithTimeoutRetry(file);
       if (!ok) {
-        throw session.lastError ?? StateError('OTA upgrade failed');
+        throw _otaSession?.lastError ?? StateError('OTA upgrade failed');
       }
 
       if (!mounted) return;
@@ -341,6 +335,7 @@ class _FirmwareUpdatePageState extends ConsumerState<FirmwareUpdatePage> {
       setState(() => _step = _FwUiStep.success);
       unawaited(_cleanupCloudFirmwareFile());
 
+      ref.read(deviceControllerProvider.notifier).setFirmwareOtaHold(false);
       ref
           .read(deviceControllerProvider.notifier)
           .kickAutoReconnect(initialDelay: const Duration(seconds: 3));
@@ -360,11 +355,65 @@ class _FirmwareUpdatePageState extends ConsumerState<FirmwareUpdatePage> {
         _step = _FwUiStep.failure;
         _errorMessage = e.toString();
       });
+      ref.read(deviceControllerProvider.notifier).setFirmwareOtaHold(false);
+      unawaited(
+        ref.read(deviceControllerProvider.notifier).kickAutoReconnect(),
+      );
     } finally {
+      ref.read(deviceControllerProvider.notifier).setFirmwareOtaHold(false);
       _cancelOtaStreams();
       await _otaSession?.dispose();
       _otaSession = null;
     }
+  }
+
+  /// mcumgr uses 10s after the first image chunk. Flash erase often overruns
+  /// that around ~10%; one automatic restart matches the device still being
+  /// in OTA and succeeding on a manual retry.
+  static const _otaTimeoutRetries = 1;
+  static const _otaRetryDelay = Duration(seconds: 2);
+
+  Future<bool> _upgradeWithTimeoutRetry(File file) async {
+    for (var attempt = 0; attempt <= _otaTimeoutRetries; attempt++) {
+      if (attempt > 0) {
+        if (!mounted) return false;
+        final l10n = AppLocalizations.of(context)!;
+        AppLog.w(
+          'FirmwareUpdatePage: SMP timeout, auto-retry '
+          '$attempt/$_otaTimeoutRetries',
+        );
+        setState(() => _statusText = l10n.otaRetryingAfterTimeout);
+        await Future<void>.delayed(_otaRetryDelay);
+        if (!mounted) return false;
+      }
+
+      _cancelOtaStreams();
+      await _otaSession?.dispose();
+      final session = OtaSession(deviceId: widget.deviceId);
+      _otaSession = session;
+      _otaProgressSub = session.events.listen(
+        (p) {
+          if (!mounted) return;
+          if (p.progress >= 0) {
+            _otaProgressTarget.value = p.progress.clamp(0.0, 1.0);
+          } else if (p.phase == OtaPhase.success ||
+              p.phase == OtaPhase.validating ||
+              p.phase == OtaPhase.resetting) {
+            _otaProgressTarget.value = 1.0;
+          }
+          setState(() => _statusText = p.message);
+        },
+        cancelOnError: false,
+      );
+
+      final ok = await session.upgrade(file);
+      if (ok) return true;
+      final error = session.lastError ?? StateError('OTA upgrade failed');
+      if (attempt >= _otaTimeoutRetries || !isRetryableOtaTimeout(error)) {
+        throw error;
+      }
+    }
+    return false;
   }
 
   @override
@@ -1282,4 +1331,13 @@ class _BigCheckIcon extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Nordic mcumgr BLE write timeout. Mid-upload uses a 10s FAST_TIMEOUT;
+/// iOS surfaces "encoder IO timed out", Android "Transaction N timed out".
+bool isRetryableOtaTimeout(Object error) {
+  final text = error.toString().toLowerCase();
+  return text.contains('timed out') ||
+      text.contains('timeout') ||
+      text.contains('encoder io');
 }

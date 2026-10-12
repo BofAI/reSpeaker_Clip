@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
-import 'package:package_info_plus/package_info_plus.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
 
 import 'sentry_config.dart';
@@ -21,16 +20,13 @@ class SentryService {
   }
 
   /// Call once during bootstrap after stores init.
-  static Future<void> configureReleaseAndTags({
+  static Future<void> configureTags({
     String? authBackend,
     bool deviceConnected = false,
   }) async {
     if (!active) return;
     try {
-      final info = await PackageInfo.fromPlatform();
       await Sentry.configureScope((scope) {
-        scope.setTag('release', '${info.version}+${info.buildNumber}');
-        scope.setTag('platform', SentryConfig.platformTag());
         scope.setTag('device_connected', deviceConnected.toString());
         if (authBackend != null && authBackend.isNotEmpty) {
           scope.setTag('auth_backend', authBackend);
@@ -140,19 +136,6 @@ class SentryService {
     );
   }
 
-  static Future<void> captureLoginFailure(Object error, {String? method}) async {
-    if (SentryNoise.isExpected(error)) return;
-    await captureMessage(
-      'Login failed${method != null ? ' ($method)' : ''}',
-      level: SentryLevel.warning,
-      extras: {
-        if (method != null) 'method': method,
-        'error': error.toString(),
-      },
-      relatedError: error,
-    );
-  }
-
   static Future<void> captureWifiBatchFailure({
     required String recordingId,
     required String sessionId,
@@ -165,15 +148,6 @@ class SentryService {
     )) {
       return;
     }
-    breadcrumb(
-      'WiFi batch failed',
-      category: 'wifi',
-      data: {
-        'recording_id': recordingId,
-        'session_id': sessionId,
-        'phase': phase,
-      },
-    );
     await captureMessage(
       'WiFi Fast Sync batch failed',
       level: SentryLevel.error,
@@ -187,24 +161,6 @@ class SentryService {
     );
   }
 
-  static Future<void> captureMergeRefused({
-    required String recordingId,
-    required int mergedBytes,
-    required int? expectedBytes,
-    required String source,
-  }) async {
-    breadcrumb(
-      'Merge refused',
-      category: 'merge',
-      data: {
-        'recording_id': recordingId,
-        'merged_bytes': mergedBytes,
-        'expected_bytes': expectedBytes,
-        'source': source,
-      },
-    );
-  }
-
   static Future<void> captureOtaFailure({
     required String deviceId,
     required Object error,
@@ -215,11 +171,6 @@ class SentryService {
     )) {
       return;
     }
-    breadcrumb(
-      'OTA failed',
-      category: 'ota',
-      data: {'device_id': deviceId},
-    );
     await captureMessage(
       'OTA firmware update failed',
       level: SentryLevel.error,

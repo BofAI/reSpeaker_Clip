@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../../app/theme/app_colors.dart';
@@ -34,8 +36,14 @@ class AppBottomSheetShell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Extend the sheet background through the home-indicator inset; pad content above it.
-    final bottomInset = MediaQuery.viewPaddingOf(context).bottom;
+    // Draw the sheet behind the home indicator, but keep buttons above both
+    // that inset and the system back-gesture zone. On some phones the gesture
+    // zone is taller than viewPadding; a tap there closes the sheet and the
+    // page under it, which leaves a black screen.
+    final bottomInset = math.max(
+      MediaQuery.viewPaddingOf(context).bottom,
+      MediaQuery.systemGestureInsetsOf(context).bottom,
+    );
     return ClipRRect(
       borderRadius: const BorderRadius.vertical(top: Radius.circular(AppRadii.r28)),
       child: Material(
@@ -71,8 +79,9 @@ Future<T?> showAppBottomSheet<T>(
   /// Animation duration; default 150ms for snappy sheets
   Duration? transitionDuration,
 }) {
-  final h = MediaQuery.of(context).size.height;
+  final h = MediaQuery.sizeOf(context).height;
   final duration = transitionDuration ?? const Duration(milliseconds: 150);
+  var popped = false;
   return showModalBottomSheet<T>(
     context: context,
     useRootNavigator: useRootNavigator,
@@ -87,45 +96,36 @@ Future<T?> showAppBottomSheet<T>(
     ),
     builder: (ctx) {
       final nav = Navigator.of(ctx, rootNavigator: useRootNavigator);
-      final keyboardInset = MediaQuery.viewInsetsOf(ctx).bottom;
       void dismiss() {
-        if (isDismissible && nav.canPop()) nav.pop();
+        if (popped || !nav.mounted || !nav.canPop()) return;
+        final route = ModalRoute.of(ctx);
+        // A bottom-edge tap on some Android phones is both the button and a
+        // system back. Pop only while this sheet is still the current route.
+        if (route == null || !route.isCurrent) return;
+        popped = true;
+        nav.pop();
       }
 
+      final keyboardInset = MediaQuery.viewInsetsOf(ctx).bottom;
       final panel = ConstrainedBox(
-        constraints: BoxConstraints(maxHeight: h - topGap - keyboardInset),
+        constraints: BoxConstraints(
+          maxHeight: math.max(0, h - topGap - keyboardInset),
+        ),
         child: AppBottomSheetShell(
           showDragHandle: showDragHandle,
           child: builder(ctx),
         ),
       );
 
-      // Full-height route child: explicit scrim tap + framework drag on the panel.
-      // Align-only layouts often miss barrier hits; a full-screen Stack does not.
-      // Lift the panel above the keyboard; the custom Stack layout does not inherit
-      // [showModalBottomSheet]'s default inset handling when pinned to bottom: 0.
-      return SizedBox(
-        height: h,
-        width: double.infinity,
-        child: Stack(
-          fit: StackFit.expand,
-          children: [
-            Positioned.fill(
-              child: GestureDetector(
-                behavior: HitTestBehavior.translucent,
-                onTap: dismiss,
-              ),
-            ),
-            AnimatedPositioned(
-              duration: duration,
-              curve: Curves.easeOut,
-              left: 0,
-              right: 0,
-              bottom: keyboardInset,
-              child: panel,
-            ),
-          ],
-        ),
+      // canPop stays false so predictive back does not also pop the page
+      // under the sheet. One explicit pop closes only this route.
+      return PopScope(
+        canPop: false,
+        onPopInvokedWithResult: (didPop, _) {
+          if (didPop || !isDismissible) return;
+          dismiss();
+        },
+        child: panel,
       );
     },
   );

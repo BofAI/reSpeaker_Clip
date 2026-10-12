@@ -204,6 +204,13 @@ class _DeviceConnectSheetState extends ConsumerState<DeviceConnectSheet>
     }
   }
 
+  void _closeSheet(bool result) {
+    if (!mounted) return;
+    final route = ModalRoute.of(context);
+    if (route == null || !route.isCurrent) return;
+    Navigator.of(context, rootNavigator: true).pop(result);
+  }
+
   void _retry() {
     if (_connectInFlight) return;
     setState(() {
@@ -281,7 +288,7 @@ class _DeviceConnectSheetState extends ConsumerState<DeviceConnectSheet>
           isScanning: st.isScanning,
           bluetoothDisabled: bluetoothDisabled,
           results: bluetoothDisabled ? const [] : filteredResults,
-          onCancel: () => Navigator.of(context).pop(false),
+          onCancel: () => _closeSheet(false),
           onCantFindDevice: () {
             setState(() => _mode = _SheetMode.help);
           },
@@ -310,7 +317,7 @@ class _DeviceConnectSheetState extends ConsumerState<DeviceConnectSheet>
             // shown for the whole connect so it is visible before state flips.
             statusHint:
                 Platform.isAndroid ? l10n.androidPairingConfirmHint : null,
-            onCancel: () => Navigator.of(context).pop(false),
+            onCancel: () => _closeSheet(false),
           );
         }
       case _SheetMode.success:
@@ -321,7 +328,7 @@ class _DeviceConnectSheetState extends ConsumerState<DeviceConnectSheet>
           return _SuccessView(
             key: const ValueKey('success'),
             deviceName: _getCurrentDeviceName(context, savedName),
-            onStartUsing: () => Navigator.of(context).pop(true),
+            onStartUsing: () => _closeSheet(true),
           );
         }
       case _SheetMode.failure:

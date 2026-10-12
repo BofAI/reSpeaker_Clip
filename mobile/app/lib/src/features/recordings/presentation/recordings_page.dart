@@ -862,15 +862,19 @@ class _RecordingsPageState extends ConsumerState<RecordingsPage>
           (showBatchActionBar ? _kBatchActionBarHeight + 8 : 0) +
           (showBatchTranscribeBanner ? _kBatchTranscribeBannerHeight + 16 : 0);
       final transferringRecRaw = transferringAsync.valueOrNull;
-      if (transferringRecRaw != null) {
-        _lastTransferringRecFromProvider = transferringRecRaw;
-      } else if (_lastTransferringRecFromProvider != null &&
-          _lastTransferringRecFromProvider!.transferState != 'transferring' &&
-          _lastTransferringRecFromProvider!.transferState != 'merging') {
-        _lastTransferringRecFromProvider = null;
-      }
-      final transferringRec =
-          transferringRecRaw ?? _lastTransferringRecFromProvider;
+      // Provider settled empty ⇒ DB has no transferring/merging row. Do not
+      // keep a stale snapshot or a completed short clip pins the banner.
+      final providerSettledEmpty = transferringAsync.maybeWhen(
+        data: (v) => v == null,
+        orElse: () => false,
+      );
+      final transferringRec = resolveTransferBannerListCandidate(
+        providerRec: transferringRecRaw,
+        cachedRec: _lastTransferringRecFromProvider,
+        items: items,
+        providerSettledEmpty: providerSettledEmpty,
+      );
+      _lastTransferringRecFromProvider = transferringRec;
 
       Recording? wifiBannerRec;
       final wifiId = wifi.recordingId;
@@ -1836,6 +1840,29 @@ String? _transcriptListPreview(String? transcript) {
   return raw.replaceAll(RegExp(r'\s+'), ' ');
 }
 
+/// Display-only: prefer the latest list row over a stale banner-provider
+/// snapshot, and drop the candidate once the row is no longer transferring.
+Recording? resolveTransferBannerListCandidate({
+  required Recording? providerRec,
+  required Recording? cachedRec,
+  required List<Recording> items,
+  required bool providerSettledEmpty,
+}) {
+  if (providerSettledEmpty) return null;
+  final seed = providerRec ?? cachedRec;
+  if (seed == null) return null;
+  var candidate = seed;
+  for (final r in items) {
+    if (r.id == seed.id) {
+      candidate = r;
+      break;
+    }
+  }
+  final state = candidate.transferState;
+  if (state != 'transferring' && state != 'merging') return null;
+  return candidate;
+}
+
 /// Top transfer banner: hide when offline, done/failed, local merge, or sync
 /// finished (100% / local merged file) with no in-flight BLE/Wi‑Fi leg.
 bool shouldShowTransferProgressUi({
@@ -1861,8 +1888,11 @@ bool shouldShowTransferProgressUi({
   if (recording.transferState != 'transferring') return false;
 
   // Post-stop short clip (< one Opus slice): keep banner through BLE leg gaps
-  // and provider reload frames until the first bytes land.
-  if (recording.endedAt != null && (recording.receivedBytes ?? 0) <= 0) {
+  // and provider reload frames until the first bytes land. Skip when a local
+  // file is already playable (merge finished; transcribe/summarize work).
+  if (recording.endedAt != null &&
+      (recording.receivedBytes ?? 0) <= 0 &&
+      (recording.localPath ?? '').trim().isEmpty) {
     return true;
   }
 
@@ -1905,7 +1935,10 @@ bool shouldShowTransferProgressUi({
   if (progress >= 1.0) return false;
 
   final hasLocal = (recording.localPath ?? '').trim().isNotEmpty;
-  if (hasLocal && progress >= 0.99) return false;
+  // Playable local file: hide even when a stale snapshot still has
+  // progress=0 (common on short clips after merge). In-flight legs
+  // already returned true above.
+  if (hasLocal) return false;
 
   return true;
 }

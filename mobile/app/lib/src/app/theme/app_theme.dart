@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 
 import 'app_colors.dart';
 import 'app_typography.dart';
@@ -30,7 +29,8 @@ class AppTheme {
       appBarTheme: AppBarTheme(
         backgroundColor: AppColors.appBackground,
         foregroundColor: AppColors.textPrimaryLegacy,
-        titleTextStyle: GoogleFonts.roboto(
+        titleTextStyle: const TextStyle(
+          fontFamily: 'Roboto',
           fontSize: AppTypography.s18,
           fontWeight: FontWeight.w500,
           color: AppColors.textPrimaryLegacy,
@@ -57,7 +57,7 @@ class AppTheme {
           backgroundColor: AppColors.brandPrimary,
           foregroundColor: Colors.white,
           elevation: 0,
-          textStyle: GoogleFonts.roboto(fontSize: AppTypography.s16, fontWeight: FontWeight.w500),
+          textStyle: const TextStyle(fontFamily: 'Roboto', fontSize: AppTypography.s16, fontWeight: FontWeight.w500),
         ).copyWith(
           overlayColor: WidgetStateProperty.resolveWith((states) {
             if (states.contains(WidgetState.pressed)) {
@@ -75,7 +75,7 @@ class AppTheme {
           backgroundColor: AppColors.surface,
           foregroundColor: AppColors.textPrimaryLegacy,
           elevation: 0,
-          textStyle: GoogleFonts.roboto(fontSize: AppTypography.s16, fontWeight: FontWeight.w500),
+          textStyle: const TextStyle(fontFamily: 'Roboto', fontSize: AppTypography.s16, fontWeight: FontWeight.w500),
         ).copyWith(
           side: WidgetStateProperty.resolveWith((states) {
             if (states.contains(WidgetState.selected) || states.contains(WidgetState.pressed)) {
@@ -117,14 +117,14 @@ class AppTheme {
         constraints: const BoxConstraints(minHeight: 48, maxHeight: 48),
         hintStyle: TextStyle(color: AppColors.textSecondary.withValues(alpha: 0.6)),
       ),
-      textTheme: GoogleFonts.robotoTextTheme(const TextTheme(
+      textTheme: const TextTheme(
         headlineLarge: TextStyle(fontSize: AppTypography.s24, fontWeight: FontWeight.w500, color: AppColors.textPrimaryLegacy, letterSpacing: -0.5),
         headlineMedium: TextStyle(fontSize: AppTypography.s22, fontWeight: FontWeight.w500, color: AppColors.textPrimaryLegacy),
         bodyLarge: TextStyle(fontSize: AppTypography.s16, fontWeight: FontWeight.w400, color: AppColors.textPrimaryLegacy),
         bodyMedium: TextStyle(fontSize: AppTypography.s14, fontWeight: FontWeight.w400, color: AppColors.textSecondary),
         bodySmall: TextStyle(fontSize: AppTypography.s12, fontWeight: FontWeight.w400, color: AppColors.textSecondary),
         labelLarge: TextStyle(fontSize: AppTypography.s12, fontWeight: FontWeight.w500, color: AppColors.textSecondary, letterSpacing: 2),
-      )),
+      ),
     );
   }
 

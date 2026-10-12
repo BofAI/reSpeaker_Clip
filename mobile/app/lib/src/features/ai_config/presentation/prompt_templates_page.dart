@@ -150,11 +150,12 @@ class _PromptTemplatesPageState extends ConsumerState<PromptTemplatesPage> {
   }
 
   Future<void> _openImportTemplateSheet(BuildContext context) async {
-    final imported = await showAppBottomSheet<bool>(
+    var imported = false;
+    await showAppBottomSheet<void>(
       context,
-      builder: (_) => const _ImportTemplateSheet(),
+      builder: (_) => _ImportTemplateSheet(onImported: () => imported = true),
     );
-    if (imported == true) ref.invalidate(promptTemplatesProvider);
+    if (imported) ref.invalidate(promptTemplatesProvider);
   }
 }
 
@@ -257,7 +258,11 @@ class _PromptTemplateCreatePageState extends ConsumerState<PromptTemplateCreateP
 }
 
 class _ImportTemplateSheet extends ConsumerStatefulWidget {
-  const _ImportTemplateSheet();
+  const _ImportTemplateSheet({required this.onImported});
+
+  /// Set before the sheet is popped. The route result is unused: popping a
+  /// bool lands on a go_router page typed as `String?` and throws.
+  final VoidCallback onImported;
 
   @override
   ConsumerState<_ImportTemplateSheet> createState() => _ImportTemplateSheetState();
@@ -270,6 +275,13 @@ class _ImportTemplateSheetState extends ConsumerState<_ImportTemplateSheet> {
   void dispose() {
     _keyCtrl.dispose();
     super.dispose();
+  }
+
+  void _close({bool imported = false}) {
+    if (!mounted) return;
+    if (imported) widget.onImported();
+    final nav = Navigator.of(context, rootNavigator: true);
+    if (nav.canPop()) nav.pop();
   }
 
   @override
@@ -285,7 +297,7 @@ class _ImportTemplateSheetState extends ConsumerState<_ImportTemplateSheet> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _SheetHeader(title: AppLocalizations.of(context)!.importTemplate, onClose: () => Navigator.of(context).pop(false)),
+            _SheetHeader(title: AppLocalizations.of(context)!.importTemplate, onClose: _close),
             const SizedBox(height: 10),
             Text(
               AppLocalizations.of(context)!.enterKeyToImport,
@@ -312,7 +324,7 @@ class _ImportTemplateSheetState extends ConsumerState<_ImportTemplateSheet> {
                     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(AppLocalizations.of(context)!.invalidKeyOrSharingStopped)));
                     return;
                   }
-                  Navigator.of(context).pop(true);
+                  _close(imported: true);
                 } catch (e) {
                   if (!context.mounted) return;
                   final l10n = AppLocalizations.of(context)!;
@@ -328,7 +340,7 @@ class _ImportTemplateSheetState extends ConsumerState<_ImportTemplateSheet> {
             ),
             const SizedBox(height: 14),
             TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
+              onPressed: _close,
               child: Text(
                 AppLocalizations.of(context)!.cancel,
                 style: const TextStyle(color: AppColors.textPlaceholder, fontSize: AppTypography.s14, fontWeight: FontWeight.w500),

@@ -802,7 +802,8 @@ Future<void> _setRecordingMode(BuildContext context, WidgetRef ref, Device devic
   final isCurrentConnected = state.connection?.device.remoteId.toString() == device.id;
   if (isCurrentConnected) {
     final ok = await ctrl.applyRecordingMode(mode);
-    if (!ok && context.mounted) {
+    if (!context.mounted) return;
+    if (!ok) {
       final l10n = AppLocalizations.of(context)!;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(l10n.deviceDetailsSettingFailedRetry)));
       return;
@@ -810,6 +811,7 @@ Future<void> _setRecordingMode(BuildContext context, WidgetRef ref, Device devic
   } else {
     // Offline: only update local preference; will be reconciled after next connect.
     await repo.updateRecordingMode(device.id, mode);
+    if (!context.mounted) return;
     ref.read(deviceDbRevisionProvider.notifier).state++;
   }
   ref.invalidate(_deviceByIdProvider(device.id));

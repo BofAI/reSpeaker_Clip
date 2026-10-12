@@ -195,6 +195,7 @@ class _LlmConfigsPageState extends ConsumerState<LlmConfigsPage> {
 
   Future<void> _openEditor(BuildContext context, LlmConfig? existing) async {
     await showLlmConfigEditorSheet(context, existing: existing);
+    if (!mounted) return;
     ref.invalidate(llmConfigsProvider);
   }
 

@@ -1287,16 +1287,29 @@ class _RecordingDetailPageState extends ConsumerState<RecordingDetailPage> {
         // Device recording whose bytes are still being pulled / merged: the local
         // file on disk is partial (or absent), so playback / waveform / transcribe
         // would operate on incomplete audio (wrong duration, broken seek, partial
-        // peaks). Render a dedicated "syncing" placeholder instead and let the
-        // page auto-refresh into the playable UI once `recordingByIdProvider`
+        // peaks). Render a dedicated placeholder instead and let the page
+        // auto-refresh into the playable UI once `recordingByIdProvider`
         // reports `transfer_state == 'done'`.
         final deviceUi = ref.watch(deviceControllerProvider);
         final activeTransferForRow =
             (deviceUi.activeTransferRecordingId ?? '').trim() ==
                 recording.id.trim();
-        final syncInProgress = recording.source == 'device' &&
+        final transferIncomplete = recording.source == 'device' &&
             (recording.transferState == 'transferring' ||
                 recording.transferState == 'merging');
+        // A stale transferring row after BLE drop is not a live pull. Keep the
+        // progress bar only while the device is linked, this row still owns
+        // the BLE leg, or a local merge is actually running.
+        final locallyMerging = transferIncomplete &&
+            transferUiLocalMergePhase(
+              recording: recording,
+              liveRecordWhileBleTransfer: false,
+              transferActiveForRecording: activeTransferForRow,
+            );
+        final syncInProgress = transferIncomplete &&
+            (deviceUi.connection != null ||
+                activeTransferForRow ||
+                locallyMerging);
         // Reuse the exact list/banner presentation so the placeholder label and
         // bar (syncing / merging / NN%) stay consistent across the app.
         final syncUi = syncInProgress
@@ -1328,8 +1341,8 @@ class _RecordingDetailPageState extends ConsumerState<RecordingDetailPage> {
           _localExistsChecking = false;
         }
         final localExists = hasLocalPath && _localExistsResult;
-        // Never bind playback / build peaks against a file that is still syncing.
-        final canPlay = localExists && !_localFileInvalid && !syncInProgress;
+        // Never bind playback / build peaks against a file that is still incomplete.
+        final canPlay = localExists && !_localFileInvalid && !transferIncomplete;
         final hasMetadataDuration = (recording.durationSeconds ?? 0) > 0;
         // After STOP the list may already show duration while local file check
         // or transfer is still in flight — keep the player chrome (incl. total
@@ -1497,8 +1510,10 @@ class _RecordingDetailPageState extends ConsumerState<RecordingDetailPage> {
                           padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
                           child: syncInProgress
                               ? _SyncStatusCard(presentation: syncUi!)
-                              : !showPlayerArea
-                                  ? Container(
+                              : transferIncomplete
+                                  ? _TransferIncompleteCard()
+                                  : !showPlayerArea
+                                      ? Container(
                                       width: double.infinity,
                                       padding: const EdgeInsets.symmetric(
                                           horizontal: 16, vertical: 14),
@@ -1638,6 +1653,7 @@ class _RecordingDetailPageState extends ConsumerState<RecordingDetailPage> {
                                     inlineTranscribeUnderTitle,
                                 hidePrimaryAction: aiWorkInProgress,
                                 syncInProgress: syncInProgress,
+                                transferIncomplete: transferIncomplete,
                               )
                             : _NoteTab(
                                 recording: recording,
@@ -2651,9 +2667,11 @@ class _SourceTab extends ConsumerWidget {
   final bool inlineTranscribeProgress;
   final bool hidePrimaryAction;
 
-  /// True while the source file is still syncing — the transcribe entry is
-  /// disabled (transcription needs the complete audio) and a hint is shown.
+  /// True while bytes are actually being pulled / merged.
   final bool syncInProgress;
+
+  /// True when the device file is not fully on disk (including after disconnect).
+  final bool transferIncomplete;
 
   const _SourceTab({
     required this.recording,
@@ -2664,6 +2682,7 @@ class _SourceTab extends ConsumerWidget {
     this.inlineTranscribeProgress = false,
     this.hidePrimaryAction = false,
     this.syncInProgress = false,
+    this.transferIncomplete = false,
   });
 
   @override
@@ -2678,6 +2697,7 @@ class _SourceTab extends ConsumerWidget {
         onTranscribeAndSummarize: onTranscribeAndSummarize,
         hidePrimaryAction: hidePrimaryAction,
         syncInProgress: syncInProgress,
+        transferIncomplete: transferIncomplete,
       );
     }
 
@@ -4170,6 +4190,32 @@ class _AiSheetHeader extends StatelessWidget {
 /// [bottomSpaceAfterButton] gap from button to Expanded bottom; with parent padding keeps tab footers aligned: Source 32, Note 8 (outer +24).
 /// [hasTranscript] true → "Summarize" button; false → "Transcribe and summarize"; use with [onSummarize].
 /// [hidePrimaryAction] true hides the bottom primary during transcribe/summarize work.
+/// Shown when a device recording is not fully on disk and nothing is actually
+/// pulling bytes (typically after BLE disconnect). Distinct from [_SyncStatusCard]
+/// so a stale transferring row does not look like a live sync.
+class _TransferIncompleteCard extends StatelessWidget {
+  @override
+  Widget build(BuildContext context) {
+    final l10n = AppLocalizations.of(context)!;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(AppRadii.r18),
+        border: Border.all(color: AppColors.borderLight),
+      ),
+      child: Text(
+        l10n.transferIncomplete,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+              color: AppColors.textSecondary,
+              height: 1.35,
+            ),
+      ),
+    );
+  }
+}
+
 /// Placeholder shown in place of the player while a device recording's audio
 /// is still being pulled / merged. Mirrors the list/banner label & bar so the
 /// state reads consistently; the page auto-swaps to the real player once the
@@ -4252,9 +4298,11 @@ class _DetailEmptyState extends StatelessWidget {
   final VoidCallback? onSummarize;
   final bool hidePrimaryAction;
 
-  /// True while the source file is still syncing — transcription needs the
-  /// complete audio, so the primary action is disabled with a hint.
+  /// True while the source file is still being pulled / merged.
   final bool syncInProgress;
+
+  /// True when the source file is not fully on disk (including after disconnect).
+  final bool transferIncomplete;
 
   const _DetailEmptyState({
     required this.title,
@@ -4265,6 +4313,7 @@ class _DetailEmptyState extends StatelessWidget {
     this.onSummarize,
     this.hidePrimaryAction = false,
     this.syncInProgress = false,
+    this.transferIncomplete = false,
   });
 
   @override
@@ -4323,16 +4372,18 @@ class _DetailEmptyState extends StatelessWidget {
               label:
                   showSummarize ? l10n.summarize : l10n.transcribeAndSummarize,
               // Transcription needs the complete audio: keep the entry visible
-              // but disabled while the source file is still syncing.
-              onPressed: syncInProgress
+              // but disabled while the source file is incomplete.
+              onPressed: transferIncomplete
                   ? null
                   : (showSummarize ? onSummarize! : onTranscribeAndSummarize),
             ),
-            if (syncInProgress)
+            if (transferIncomplete)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
-                  l10n.waitCurrentTransferToRetry,
+                  syncInProgress
+                      ? l10n.waitCurrentTransferToRetry
+                      : l10n.transferIncomplete,
                   textAlign: TextAlign.center,
                   style: const TextStyle(
                     fontSize: 12,

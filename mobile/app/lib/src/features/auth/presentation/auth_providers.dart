@@ -247,7 +247,6 @@ class EmailLoginController extends Notifier<EmailLoginUiState> {
       return email;
     } catch (e) {
       state = state.copyWith(error: e.toString());
-      unawaited(SentryService.captureLoginFailure(e, method: 'email_code'));
       rethrow;
     } finally {
       state = state.copyWith(verifying: false);

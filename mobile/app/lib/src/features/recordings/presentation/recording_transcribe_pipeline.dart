@@ -74,8 +74,17 @@ Future<String?> runRecordingTranscriptionPipeline({
   final repo = await ref.read(recordingsRepositoryProvider.future);
 
   Future<void> failJob(String state) async {
-    await repo.updateJobState(recording.id, state);
-    _refreshRecordingUi(ref, recording.id);
+    // Logout/account switching invalidates the account DB while an in-flight
+    // request is unwinding. Do not let that secondary DB error mask the real
+    // cancellation or leave the task future unresolved.
+    try {
+      await repo.updateJobState(recording.id, state);
+      _refreshRecordingUi(ref, recording.id);
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('[ASR] unable to persist terminal job state: $e');
+      }
+    }
   }
 
   final p = recording.localPath;
@@ -235,6 +244,10 @@ Future<String?> runRecordingTranscriptionPipeline({
             shouldAbort: shouldAbort,
           );
         } on TranscriptionAbortedException {
+          rethrow;
+        } on ChunkedAsrException {
+          rethrow;
+        } on ServerException {
           rethrow;
         } catch (e) {
           if (kDebugMode) {

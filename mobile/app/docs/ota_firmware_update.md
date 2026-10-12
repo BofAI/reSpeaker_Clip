@@ -69,10 +69,19 @@
 - On failure: `_step = _FwUiStep.failure`, `_errorMessage = e.toString()`
 - UI: `_FailureView` shows the message with a back action
 - Log: `AppLog.w('FirmwareUpdatePage: OTA failed', e, StackTrace.current)`
+- **Timeout auto-retry**: mcumgr mid-upload wait is 10s (`FAST_TIMEOUT`). If the
+  first attempt fails with a write timeout (often ~10% progress while the
+  device is still erasing flash), the page waits 2s and starts OTA once more
+  without leaving the upload screen. Sentry is only sent after the retry fails.
 
 ---
 
 ## 7. Configuration and timing
 
 - `FirmwareUpgradeConfiguration`: `eraseAppSettings: true`, `estimatedSwapTime: Duration.zero`
+- Mid-upload SMP response timeout is **library-default 10s** (not configurable
+  via `mcumgr_flutter`). First chunk uses 40s.
+- Before SMP starts, the AT/JSON GATT is **released** (`releaseAtLinkForFirmwareOta`)
+  so only mcumgr talks to the device — same as nRF Connect. Auto-reconnect,
+  GSTAT and idle time sync stay held until OTA ends, then AT is restored.
 - Minimum progress display: `_minProgressDisplayDuration = 2500ms` so tiny updates do not flash past

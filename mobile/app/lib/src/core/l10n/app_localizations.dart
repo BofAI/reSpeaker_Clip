@@ -2030,6 +2030,12 @@ class AppLocalizations {
   String get firmwareUpdate =>
       _localizedValues[locale.languageCode]?['firmwareUpdate'] ??
       'Firmware Update';
+  String get otaRetryingAfterTimeout =>
+      _localizedValues[locale.languageCode]?['otaRetryingAfterTimeout'] ??
+      'Transfer timed out, retrying...';
+  String get transferIncomplete =>
+      _localizedValues[locale.languageCode]?['transferIncomplete'] ??
+      'This file has not finished transferring. Connect the device to continue.';
   String get downloadingNewVersion =>
       _localizedValues[locale.languageCode]?['downloadingNewVersion'] ??
       'Downloading New Version...';
@@ -4200,6 +4206,9 @@ class AppLocalizations {
       'connectionFailed': 'Connection failed',
       'firmwareUpdate': 'Firmware Update',
       'downloadingNewVersion': 'Downloading New Version...',
+      'otaRetryingAfterTimeout': 'Transfer timed out, retrying...',
+      'transferIncomplete':
+          'This file has not finished transferring. Connect the device to continue.',
       'installing': 'Installing...',
       'keepDeviceClose': 'Keep the device close and Bluetooth\nconnected.',
       'doNotTurnOffDuringInstall':
@@ -5425,6 +5434,8 @@ class AppLocalizations {
       'connectionFailed': '连接失败',
       'firmwareUpdate': '固件更新',
       'downloadingNewVersion': '正在下载新版本...',
+      'otaRetryingAfterTimeout': '传输超时，正在自动重试...',
+      'transferIncomplete': '文件尚未传输完成，请连接设备后继续同步',
       'installing': '安装中...',
       'keepDeviceClose': '请保持设备靠近并保持蓝牙连接。',
       'doNotTurnOffDuringInstall': '安装过程中请勿关闭设备或退出应用，以确保固件完整。',

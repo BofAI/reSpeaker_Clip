@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:sentry_flutter/sentry_flutter.dart';
@@ -43,7 +42,7 @@ class SentryConfig {
     options.tracesSampleRate = 0.0;
     options.enableAutoSessionTracking = enabled;
     // Drop high-volume auto breadcrumbs. We keep only the manual breadcrumbs we
-    // add ourselves (wifi/ota/merge) which carry the useful transfer context.
+    // add ourselves (Wi-Fi/BLE/transfer) which carry useful device context.
     // - print: AppLog (logger pkg) routes through debugPrint, so every log line
     //   would otherwise become a breadcrumb in release builds.
     // - user interaction / native system events add little to crash triage here.
@@ -134,12 +133,6 @@ class SentryConfig {
       }
     }
     return false;
-  }
-
-  static String platformTag() {
-    if (Platform.isIOS) return 'ios';
-    if (Platform.isAndroid) return 'android';
-    return Platform.operatingSystem;
   }
 
   /// Strip sensitive keys from manual [SentryService] extras/breadcrumbs.

@@ -170,6 +170,78 @@ class Recording {
     required this.lastAutoSpeaker,
     required this.updatedAt,
   });
+
+  /// Progress-only snapshot. Does not change [updatedAt], so operation-time
+  /// sort keeps the row in place while bytes are still moving.
+  ///
+  /// Null arguments keep the current value. Pass `''` to clear an error.
+  Recording copyWithTransferProgress({
+    String? transferState,
+    double? transferProgress,
+    int? receivedBytes,
+    int? expectedBytes,
+    DateTime? lastPacketAt,
+    String? transferError,
+    String? transferErrorCode,
+  }) {
+    return Recording(
+      id: id,
+      deviceId: deviceId,
+      devicePath: devicePath,
+      sessionId: sessionId,
+      asrResultId: asrResultId,
+      recordingState: recordingState,
+      startedAt: startedAt,
+      endedAt: endedAt,
+      tmpPath: tmpPath,
+      mtu: mtu,
+      lastPacketAt: lastPacketAt ?? this.lastPacketAt,
+      transferStartedAt: transferStartedAt,
+      transferFinishedAt: transferFinishedAt,
+      remoteId: remoteId,
+      remoteUrl: remoteUrl,
+      transport: transport,
+      connectionId: connectionId,
+      lastSttJobId: lastSttJobId,
+      lastSummaryJobId: lastSummaryJobId,
+      name: name,
+      sizeBytes: sizeBytes,
+      durationSeconds: durationSeconds,
+      createdAt: createdAt,
+      localPath: localPath,
+      format: format,
+      container: container,
+      sampleRate: sampleRate,
+      channels: channels,
+      bitDepth: bitDepth,
+      receivedBytes: receivedBytes ?? this.receivedBytes,
+      expectedBytes: expectedBytes ?? this.expectedBytes,
+      lastSeq: lastSeq,
+      crc32: crc32,
+      folderId: folderId,
+      source: source,
+      isDeleted: isDeleted,
+      deletedAt: deletedAt,
+      devicePresent: devicePresent,
+      transferState: transferState ?? this.transferState,
+      transferProgress: transferProgress ?? this.transferProgress,
+      transferError: transferError ?? this.transferError,
+      transferErrorCode: transferErrorCode ?? this.transferErrorCode,
+      uploadState: uploadState,
+      jobState: jobState,
+      transcript: transcript,
+      summary: summary,
+      currentSummaryId: currentSummaryId,
+      transcriptPath: transcriptPath,
+      summaryPath: summaryPath,
+      lastSttConfigId: lastSttConfigId,
+      lastLlmConfigId: lastLlmConfigId,
+      lastTemplateId: lastTemplateId,
+      lastLanguage: lastLanguage,
+      lastAutoSpeaker: lastAutoSpeaker,
+      updatedAt: updatedAt,
+    );
+  }
 }
 
 /// Denominator for list/banner transfer progress when both fields are set.

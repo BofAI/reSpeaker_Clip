@@ -98,7 +98,7 @@ Future<void> bootstrap() async {
     unawaited(SentryService.setUser(email: cachedSession!.email));
   }
   final authBackend = AuthBackendStore.cached?.storageValue;
-  await SentryService.configureReleaseAndTags(authBackend: authBackend);
+  await SentryService.configureTags(authBackend: authBackend);
 
   FlutterError.onError = (details) {
     AppLog.e('FlutterError', details.exception, details.stack);

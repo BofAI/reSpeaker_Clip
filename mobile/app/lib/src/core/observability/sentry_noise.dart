@@ -48,6 +48,9 @@ class SentryNoise {
     if (_isExpectedDatabaseClosed(error)) return true;
     if (_isExpectedOtaUserError(error)) return true;
     if (_isExpectedAuthUserError(error)) return true;
+    if (_isExpectedFontFetchFailure(error)) return true;
+    if (_isExpectedClosedFirmwareUpdateStream(error, stackTrace)) return true;
+    if (_isExpectedGoRouterNavigatorMissing(error, stackTrace)) return true;
     return false;
   }
 
@@ -200,5 +203,43 @@ class SentryNoise {
     if (s.contains('Network unavailable.')) return true;
     if (error is StateError && s.contains('invalid code')) return true;
     return false;
+  }
+
+  /// google_fonts fetching Roboto from fonts.gstatic.com. Offline and device
+  /// hotspots cannot resolve that host; the glyphs fall back locally.
+  static bool _isExpectedFontFetchFailure(Object error) {
+    final lower = error.toString().toLowerCase();
+    return lower.contains('failed to load font') ||
+        lower.contains('fonts.gstatic.com');
+  }
+
+  /// Nordic mcumgr writes one more state after the OTA stream is closed,
+  /// usually because the link dropped mid-update.
+  static bool _isExpectedClosedFirmwareUpdateStream(
+    Object error,
+    StackTrace? stackTrace,
+  ) {
+    final s = error.toString();
+    if (!s.contains('Cannot add new events after calling close')) return false;
+    return _traceContainsAny(stackTrace, const [
+      'UpdateManager',
+      '_setupUpdateStateStream',
+      'FirmwareUpdateManager',
+      'mcumgr',
+    ]);
+  }
+
+  /// go_router looks up the current navigator during a pop/redirect after the
+  /// match list is already empty. One-off race, not an app logic bug.
+  static bool _isExpectedGoRouterNavigatorMissing(
+    Object error,
+    StackTrace? stackTrace,
+  ) {
+    if (!error.toString().contains('Bad state: No element')) return false;
+    return _traceContainsAny(stackTrace, const [
+      'GoRouterDelegate',
+      '_findCurrentNavigator',
+      'go_router',
+    ]);
   }
 }

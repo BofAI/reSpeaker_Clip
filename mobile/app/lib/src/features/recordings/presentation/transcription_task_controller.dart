@@ -46,36 +46,89 @@ final reconcileStuckTranscriptionJobsProvider = FutureProvider<void>((ref) async
 
 class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
   final Map<String, bool> _cancelRequested = {};
+  final Map<String, int> _activeTaskGeneration = {};
+  final Map<String, Set<String>> _interruptedIdsByAccountKey = {};
+  int _accountGeneration = 0;
   bool _reconcileInFlight = false;
 
   @override
   TranscriptionTaskState build() {
     ref.listen<String?>(accountDbKeyProvider, (prev, next) {
-      if (prev != null && prev != next) {
+      if (prev != next) {
+        _accountGeneration++;
+        if (prev != null &&
+            prev.isNotEmpty &&
+            state.activeRecordingIds.isNotEmpty) {
+          _interruptedIdsByAccountKey
+              .putIfAbsent(prev, () => <String>{})
+              .addAll(state.activeRecordingIds);
+        }
         for (final id in state.activeRecordingIds) {
           _cancelRequested[id] = true;
         }
         state = const TranscriptionTaskState();
+        // Login can land directly on the detail page, without rebuilding the
+        // recordings list that normally triggers reconciliation. Reconcile the
+        // newly selected account shard as soon as its DB becomes available.
+        if (next != null && next.isNotEmpty) {
+          Future<void>.microtask(() => _recoverAfterAccountLogin(next));
+        }
       }
     });
     return const TranscriptionTaskState();
+  }
+
+  Future<void> _recoverAfterAccountLogin(String accountKey) async {
+    final interrupted = _interruptedIdsByAccountKey.remove(accountKey);
+    if (interrupted != null && interrupted.isNotEmpty) {
+      try {
+        final repo = await ref.read(recordingsRepositoryProvider.future);
+        for (final id in interrupted) {
+          final rec = await repo.getById(id);
+          // Logout is a hard ownership boundary: never continue an old account's
+          // job after another login, even when the server job id still exists.
+          // Make every interrupted row explicitly retryable.
+          if (rec != null) {
+            await repo.updateJobState(id, 'none');
+            _publish(id);
+          }
+        }
+      } catch (e, st) {
+        if (kDebugMode) {
+          debugPrint('[ASR login recovery] account=$accountKey: $e\n$st');
+        }
+      }
+    }
+    await reconcileStuckJobs();
   }
 
   void cancel(String recordingId) {
     _cancelRequested[recordingId.trim()] = true;
   }
 
-  void _registerActive(String recordingId) {
+  void _registerActive(
+    String recordingId, {
+    required int generation,
+    String? message,
+  }) {
     final id = recordingId.trim();
     _cancelRequested.remove(id);
+    _activeTaskGeneration[id] = generation;
+    final progress = Map<String, String>.from(state.progressByRecordingId);
+    final trimmed = message?.trim() ?? '';
+    if (trimmed.isNotEmpty) progress[id] = trimmed;
     state = TranscriptionTaskState(
-      progressByRecordingId: state.progressByRecordingId,
+      progressByRecordingId: progress,
       activeRecordingIds: {...state.activeRecordingIds, id},
     );
   }
 
-  void _unregisterActive(String recordingId) {
+  void _unregisterActive(String recordingId, {int? generation}) {
     final id = recordingId.trim();
+    if (generation != null && _activeTaskGeneration[id] != generation) {
+      return;
+    }
+    _activeTaskGeneration.remove(id);
     final nextProgress = Map<String, String>.from(state.progressByRecordingId)
       ..remove(id);
     final nextActive = Set<String>.from(state.activeRecordingIds)..remove(id);
@@ -86,9 +139,14 @@ class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
     );
   }
 
-  void _setProgress(String recordingId, String message) {
+  void _setProgress(String recordingId, String message, {int? generation}) {
     final id = recordingId.trim();
     if (message.trim().isEmpty) return;
+    if (generation != null &&
+        (_accountGeneration != generation ||
+            _activeTaskGeneration[id] != generation)) {
+      return;
+    }
     state = TranscriptionTaskState(
       progressByRecordingId: {...state.progressByRecordingId, id: message},
       activeRecordingIds: state.activeRecordingIds,
@@ -108,17 +166,18 @@ class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
     final id = recording.id.trim();
     if (state.isActive(id)) return null;
 
-    _registerActive(id);
-    final progressNotifier = ValueNotifier<String>('');
+    final generation = _accountGeneration;
+    final locale = ref.read(appLocaleProvider);
+    final l10n = AppLocalizations(locale);
+    _registerActive(id, generation: generation, message: l10n.transcribing);
+    final progressNotifier = ValueNotifier<String>(l10n.transcribing);
     void onProgressChanged() {
       final msg = progressNotifier.value;
-      if (msg.isNotEmpty) _setProgress(id, msg);
+      if (msg.isNotEmpty) _setProgress(id, msg, generation: generation);
     }
 
     progressNotifier.addListener(onProgressChanged);
     try {
-      final locale = ref.read(appLocaleProvider);
-      final l10n = AppLocalizations(locale);
       return await runRecordingTranscriptionPipeline(
         ref: ref,
         l10n: l10n,
@@ -128,14 +187,15 @@ class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
         asrResultId: asrResultId,
         selection: selection,
         progressMessage: progressNotifier,
-        shouldAbort: () => _cancelRequested[id] == true,
+        shouldAbort: () =>
+            generation != _accountGeneration || _cancelRequested[id] == true,
         allowGatewayTimeoutRetry: allowGatewayTimeoutRetry,
         onGatewayTimeoutRetry: onGatewayTimeoutRetry,
       );
     } finally {
       progressNotifier.removeListener(onProgressChanged);
       progressNotifier.dispose();
-      _unregisterActive(id);
+      _unregisterActive(id, generation: generation);
     }
   }
 
@@ -144,15 +204,32 @@ class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
     if (_reconcileInFlight) return;
     _reconcileInFlight = true;
     try {
-      final repo = await ref.read(recordingsRepositoryProvider.future);
-      final stuck = await repo.listTranscriptionJobsInProgress();
-      if (stuck.isEmpty) return;
+      await withFreshRecordingsRepo(ref, (repo) async {
+        final stuck = await repo.listTranscriptionJobsInProgress();
+        if (stuck.isEmpty) return;
 
-      final asrApi = ref.read(asrApiProvider);
-      for (final rec in stuck) {
-        if (state.isActive(rec.id)) continue;
-        await _reconcileRecording(rec, repo, asrApi);
-      }
+        final asrApi = ref.read(asrApiProvider);
+        for (final rec in stuck) {
+          final hasTranscript = (rec.transcript ?? '').trim().isNotEmpty;
+          if (state.isActive(rec.id)) {
+            // A live run always publishes a progress string with the active
+            // flag. Active with no message is a leftover lock.
+            if (hasTranscript && state.progressFor(rec.id) == null) {
+              _unregisterActive(rec.id);
+            } else {
+              continue;
+            }
+          }
+          // A row that already has text is a finished result, not a live job.
+          // Polling it would keep the detail page on "transcribing".
+          if (hasTranscript) {
+            await repo.updateJobState(rec.id, 'done');
+            _publish(rec.id);
+            continue;
+          }
+          await _reconcileRecording(rec, repo, asrApi);
+        }
+      });
     } finally {
       _reconcileInFlight = false;
     }
@@ -197,16 +274,24 @@ class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
 
   Future<void> _resumeServerJobPoll(Recording rec, int jobId) async {
     if (state.isActive(rec.id)) return;
-    _registerActive(rec.id);
+    final generation = _accountGeneration;
+    final l10n = AppLocalizations(ref.read(appLocaleProvider));
+    _registerActive(
+      rec.id,
+      generation: generation,
+      message: l10n.transcribing,
+    );
     try {
       final asrApi = ref.read(asrApiProvider);
       final repo = await ref.read(recordingsRepositoryProvider.future);
-      final l10n = AppLocalizations(ref.read(appLocaleProvider));
-      _setProgress(rec.id, l10n.transcribing);
 
       final finishedJob = await asrApi.waitJobUntilDone(
         jobId,
         onJobUpdate: (job) async {
+          if (generation != _accountGeneration ||
+              _activeTaskGeneration[rec.id] != generation) {
+            return;
+          }
           final nextState = switch (job.status) {
             'pending' => 'queued',
             'running' => 'transcribing',
@@ -223,6 +308,10 @@ class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
         },
       );
 
+      if (generation != _accountGeneration ||
+          _activeTaskGeneration[rec.id] != generation) {
+        return;
+      }
       if (finishedJob.isSucceeded) {
         await _finishFromServerJob(rec, finishedJob, asrApi, repo);
       } else {
@@ -233,8 +322,18 @@ class TranscriptionTaskController extends Notifier<TranscriptionTaskState> {
       if (kDebugMode) {
         debugPrint('[ASR resume poll] ${rec.id}: $e\n$st');
       }
+      if (generation == _accountGeneration &&
+          _activeTaskGeneration[rec.id] == generation) {
+        try {
+          final repo = await ref.read(recordingsRepositoryProvider.future);
+          await repo.updateJobState(rec.id, 'failed');
+          _publish(rec.id);
+        } catch (_) {
+          // The account may have been invalidated while handling the error.
+        }
+      }
     } finally {
-      _unregisterActive(rec.id);
+      _unregisterActive(rec.id, generation: generation);
     }
   }
 

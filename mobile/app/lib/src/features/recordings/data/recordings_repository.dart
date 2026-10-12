@@ -102,6 +102,7 @@ class TransferRecordingsRepository {
     DateTime? lastPacketAt,
     DateTime? transferStartedAt,
     DateTime? transferFinishedAt,
+    bool touchUpdatedAt = true,
     bool clearTransferFinishedAt = false,
     String? recordingState,
     String? tmpPath,
@@ -125,6 +126,7 @@ class TransferRecordingsRepository {
           lastPacketAt: lastPacketAt,
           transferStartedAt: transferStartedAt,
           transferFinishedAt: transferFinishedAt,
+          touchUpdatedAt: touchUpdatedAt,
           clearTransferFinishedAt: clearTransferFinishedAt,
           recordingState: recordingState,
           tmpPath: tmpPath,
@@ -450,47 +452,69 @@ class RecordingsRepository {
     return count;
   }
 
-  /// On app startup: if file at local_path does not exist (e.g. sandbox path changed after reinstall), clear local_path.
-  /// Returns count cleared. UI will show "sync to device first", user can re-download from device.
+  /// Startup: rewrite sandbox UUID / legacy dirs when the file still exists;
+  /// only then clear `local_path` if no candidate file is present.
+  ///
+  /// Overlay reinstall on iOS keeps Documents files but changes the container
+  /// UUID. Clearing first would drop playable audio while transcript text
+  /// remains in SQLite.
+  ///
+  /// Returns the number of rows updated (remapped or cleared).
   Future<int> clearInvalidLocalPaths({required String accountKey}) async {
+    final docs = await AccountStoragePaths.documentsRoot();
     final rows = await db.query(
       'recordings',
-      columns: ['id', 'local_path'],
-      where: 'local_path IS NOT NULL AND local_path != ?',
-      whereArgs: [''],
+      columns: ['id', 'local_path', 'transcript_path', 'summary_path'],
+      where:
+          "(local_path IS NOT NULL AND local_path != '') OR "
+          "(transcript_path IS NOT NULL AND transcript_path != '') OR "
+          "(summary_path IS NOT NULL AND summary_path != '')",
     );
     int count = 0;
     final now = DateTime.now().toIso8601String();
     for (final r in rows) {
-      final path = (r['local_path'] as String?)?.trim();
-      if (path == null || path.isEmpty) continue;
-      final effective =
-          AccountStoragePaths.rewriteLegacyRecordingPath(path, accountKey) ??
-              path;
-      try {
-        if (effective != path) {
-          if (await File(effective).exists()) {
-            await db.update(
-              'recordings',
-              {'local_path': effective, 'updated_at': now},
-              where: 'id = ?',
-              whereArgs: [r['id']],
-            );
+      final updates = <String, Object?>{};
+      for (final col in ['local_path', 'transcript_path', 'summary_path']) {
+        final raw = (r[col] as String?)?.trim();
+        if (raw == null || raw.isEmpty) continue;
+        try {
+          final resolved = await _firstExistingPathCandidate(
+            storedPath: raw,
+            accountKey: accountKey,
+            documentsRoot: docs,
+          );
+          if (resolved != null) {
+            if (resolved != raw) updates[col] = resolved;
             continue;
           }
-        }
-        if (!await File(effective).exists()) {
-          await db.update(
-            'recordings',
-            {'local_path': null, 'updated_at': now},
-            where: 'id = ?',
-            whereArgs: [r['id']],
-          );
-          count++;
-        }
-      } catch (_) {}
+          if (col == 'local_path') {
+            updates[col] = null;
+          }
+        } catch (_) {}
+      }
+      if (updates.isEmpty) continue;
+      updates['updated_at'] = now;
+      await db.update('recordings', updates, where: 'id = ?', whereArgs: [r['id']]);
+      count++;
     }
     return count;
+  }
+
+  Future<String?> _firstExistingPathCandidate({
+    required String storedPath,
+    required String accountKey,
+    required String documentsRoot,
+  }) async {
+    for (final candidate in AccountStoragePaths.localPathRewriteCandidates(
+      storedPath: storedPath,
+      accountKey: accountKey,
+      documentsRoot: documentsRoot,
+    )) {
+      try {
+        if (await File(candidate).exists()) return candidate;
+      } catch (_) {}
+    }
+    return null;
   }
 
   Future<List<Recording>> listByDeviceId(String deviceId) async {
@@ -554,6 +578,12 @@ class RecordingsRepository {
     DateTime? lastPacketAt,
     DateTime? transferStartedAt,
     DateTime? transferFinishedAt,
+
+    /// When false, leave `updated_at` unchanged. In-flight byte progress uses
+    /// this so home "operation time" sort does not move the row on every tick.
+    /// Start, finish, failure, and other state changes keep the default.
+    bool touchUpdatedAt = true,
+
     /// When true, clears [transfer_finished_at] (e.g. Fast Sync gave up but BLE can continue).
     bool clearTransferFinishedAt = false,
     String? recordingState,
@@ -563,8 +593,8 @@ class RecordingsRepository {
     final now = DateTime.now().toIso8601String();
     final updates = <String, Object?>{
       'transfer_state': state,
-      'updated_at': now,
     };
+    if (touchUpdatedAt) updates['updated_at'] = now;
     if (progress != null) updates['transfer_progress'] = progress;
     if (error != null) updates['transfer_error'] = error;
     if (errorCode != null) updates['transfer_error_code'] = errorCode;

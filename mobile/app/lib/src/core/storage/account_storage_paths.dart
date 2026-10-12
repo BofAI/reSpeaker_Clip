@@ -88,6 +88,83 @@ class AccountStoragePaths {
     return trimmed.replaceFirst(legacySeg, accountSeg);
   }
 
+  /// Rewrites a stored absolute path onto the current app Documents root.
+  ///
+  /// iOS overlay installs often keep files but change the container UUID
+  /// (`…/Application/<uuid>/Documents/…`). DB rows still hold the old UUID.
+  static String remapToCurrentDocumentsRoot(
+    String storedPath,
+    String documentsRoot,
+  ) {
+    final trimmed = storedPath.trim();
+    if (trimmed.isEmpty) return storedPath;
+    final docs = documentsRoot.trim();
+    if (docs.isEmpty) return trimmed;
+
+    final storedNorm = p.normalize(trimmed);
+    final docsNorm = p.normalize(docs);
+
+    if (p.equals(storedNorm, docsNorm) || p.isWithin(docsNorm, storedNorm)) {
+      return storedNorm;
+    }
+
+    const documentsMarker = '/Documents/';
+    final docsIdx = storedNorm.lastIndexOf(documentsMarker);
+    if (docsIdx >= 0) {
+      final relative = storedNorm.substring(docsIdx + documentsMarker.length);
+      if (relative.isNotEmpty) {
+        return p.normalize(p.join(docsNorm, relative));
+      }
+    }
+
+    for (final marker in [
+      '/recordings_',
+      '/recordings/',
+      '/trimmed_',
+      '/trimmed/',
+    ]) {
+      final idx = storedNorm.lastIndexOf(marker);
+      if (idx >= 0) {
+        return p.normalize(p.join(docsNorm, storedNorm.substring(idx + 1)));
+      }
+    }
+
+    if (storedNorm.startsWith('recordings_') ||
+        storedNorm.startsWith('recordings/') ||
+        storedNorm.startsWith('trimmed_') ||
+        storedNorm.startsWith('trimmed/')) {
+      return p.normalize(p.join(docsNorm, storedNorm));
+    }
+
+    return storedNorm;
+  }
+
+  /// Ordered rewrite candidates for a stored recording/sidecar path.
+  ///
+  /// First existing file wins at startup: original, legacy dir rename, then
+  /// current-sandbox remaps. Does not check the filesystem.
+  static List<String> localPathRewriteCandidates({
+    required String storedPath,
+    required String accountKey,
+    required String documentsRoot,
+  }) {
+    final seen = <String>{};
+    final out = <String>[];
+    void add(String? value) {
+      final trimmed = value?.trim();
+      if (trimmed == null || trimmed.isEmpty) return;
+      final norm = p.normalize(trimmed);
+      if (seen.add(norm)) out.add(norm);
+    }
+
+    add(storedPath);
+    final legacy = rewriteLegacyRecordingPath(storedPath, accountKey);
+    add(legacy);
+    add(remapToCurrentDocumentsRoot(storedPath, documentsRoot));
+    add(remapToCurrentDocumentsRoot(legacy ?? storedPath, documentsRoot));
+    return out;
+  }
+
   /// Moves files from unified-era `recordings/` and `trimmed/` into per-account dirs.
   ///
   /// Skips when the destination file already exists. Returns count of files moved.

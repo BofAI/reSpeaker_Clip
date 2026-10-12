@@ -207,6 +207,7 @@ class _SttConfigsPageState extends ConsumerState<SttConfigsPage> {
     }
     if (!context.mounted) return;
     await showSttConfigEditorSheet(context, existing: toEdit);
+    if (!mounted) return;
     ref.invalidate(sttConfigsProvider);
   }
 

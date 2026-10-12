@@ -6,7 +6,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../db/account_db_key.dart';
 import '../log/app_log.dart';
-import '../observability/sentry_service.dart';
 import '../storage/account_storage_paths.dart';
 import 'raw_opus_utils.dart';
 import 'session_merge_executor.dart';
@@ -341,14 +340,6 @@ class SessionMergeQueue {
       AppLog.e(
         'SessionMergeQueue: refuse done — merged=${perform.mergedBytes} '
         'expected=$firmwareExpected recording=${job.recordingId}',
-      );
-      unawaited(
-        SentryService.captureMergeRefused(
-          recordingId: job.recordingId,
-          mergedBytes: perform.mergedBytes,
-          expectedBytes: firmwareExpected,
-          source: job.source,
-        ),
       );
       await recRepo.updateTransfer(
         id: job.recordingId,

@@ -63,6 +63,10 @@ class ReSpeakerApp extends ConsumerWidget {
       // New account logged in: ensure paged list rebuilds from the new shard.
       if (next != null) {
         ref.invalidate(recordingsListPagedNotifierProvider);
+        // A login can return directly to a detail page. Kick the transcription
+        // reconciler as well so jobs left by a logout are not shown forever as
+        // an active loading state.
+        ref.read(reconcileStuckTranscriptionJobsProvider);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           bumpRecordingsLists(ref);
         });

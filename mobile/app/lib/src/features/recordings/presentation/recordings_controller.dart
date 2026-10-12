@@ -55,6 +55,43 @@ void bumpRecordingsLists(
   ref.invalidate(recordingsRowCountProvider);
 }
 
+/// In-flight byte progress for one recording.
+///
+/// Updates the loaded home row in place and refreshes the detail/sheet query.
+/// Does not refetch the window, list counts, or [Recording.updatedAt]. When the
+/// row is outside the loaded window, refresh the top-banner query only.
+void publishTransferProgressSnapshot(
+  dynamic ref, {
+  required String recordingId,
+  required String transferState,
+  double? progress,
+  int? receivedBytes,
+  int? expectedBytes,
+  DateTime? lastPacketAt,
+  String? error,
+  String? errorCode,
+}) {
+  final inWindow = ref
+      .read(recordingsListPagedNotifierProvider.notifier)
+      .applyTransferProgress(
+        id: recordingId,
+        transferState: transferState,
+        progress: progress,
+        receivedBytes: receivedBytes,
+        expectedBytes: expectedBytes,
+        lastPacketAt: lastPacketAt,
+        error: error,
+        errorCode: errorCode,
+      );
+  ref.invalidate(recordingByIdProvider(recordingId));
+  // Search reads the full list, ordered by created_at. Refresh it without
+  // reloading the home window.
+  ref.invalidate(recordingsListProvider);
+  if (!inWindow) {
+    ref.invalidate(transferringBannerRecordingProvider);
+  }
+}
+
 final recordingsRowCountProvider = FutureProvider<int>((ref) async {
   final repo = await ref.watch(recordingsRepositoryProvider.future);
   return repo.totalRecordingsRows();
@@ -122,6 +159,56 @@ class RecordingsListPagedNotifier extends Notifier<RecordingsPagedState> {
       _reloadAfterDbDebounce = null;
       unawaited(reloadAfterDbChange());
     });
+  }
+
+  /// Patches transfer progress on one loaded row. Returns false when [id] is
+  /// not in the current window.
+  ///
+  /// Ignores a late `transferring` snapshot after the row has already moved to
+  /// merging, done, or failed, so a queued progress write cannot put the card
+  /// back into syncing after completion refreshed the list.
+  bool applyTransferProgress({
+    required String id,
+    String? transferState,
+    double? progress,
+    int? receivedBytes,
+    int? expectedBytes,
+    DateTime? lastPacketAt,
+    String? error,
+    String? errorCode,
+  }) {
+    if (id.isEmpty || state.items.isEmpty) return false;
+    final idx = state.items.indexWhere((r) => r.id == id);
+    if (idx < 0) return false;
+    final current = state.items[idx];
+    if (transferState == 'transferring' &&
+        (current.transferState == 'merging' ||
+            current.transferState == 'done' ||
+            current.transferState == 'failed')) {
+      return true;
+    }
+    final next = current.copyWithTransferProgress(
+      transferState: transferState,
+      transferProgress: progress,
+      receivedBytes: receivedBytes,
+      expectedBytes: expectedBytes,
+      lastPacketAt: lastPacketAt,
+      transferError: error,
+      transferErrorCode: errorCode,
+    );
+    if (next.transferState == current.transferState &&
+        next.transferProgress == current.transferProgress &&
+        next.receivedBytes == current.receivedBytes &&
+        next.expectedBytes == current.expectedBytes &&
+        next.lastPacketAt == current.lastPacketAt &&
+        next.transferError == current.transferError &&
+        next.transferErrorCode == current.transferErrorCode) {
+      return true;
+    }
+    final items = List<Recording>.of(state.items);
+    items[idx] = next;
+    state = state.copyWith(items: items);
+    return true;
   }
 
   /// Drops rows immediately (e.g. after move-to-recycle) before SQLite reload runs.
