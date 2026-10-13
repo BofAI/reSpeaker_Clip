@@ -878,7 +878,9 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             }
         }
 
-        if (strcmp(mode_str, "normal") == 0 || strcmp(mode_str, "stereo") == 0) {
+        /* "stereo" removed: the firmware records merged mono in every
+         * mode (L+R pipeline); the alias falsely implied stereo output. */
+        if (strcmp(mode_str, "normal") == 0) {
             rec_mode = MODE_NORMAL;
         } else if (strcmp(mode_str, "enhanced") == 0 || strcmp(mode_str, "merge") == 0) {
             rec_mode = MODE_ENHANCED;
@@ -888,7 +890,7 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
             rtc_request = true;
             rec_mode = c->config.mode;
         } else {
-            return create_json_response(false, "invalid mode (normal/stereo/enhanced/merge/rtc)", NULL, response, len);
+            return create_json_response(false, "invalid mode (normal/enhanced/merge/rtc)", NULL, response, len);
         }
 
         /* Apply mode for this session */
