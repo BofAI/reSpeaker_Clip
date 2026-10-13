@@ -218,7 +218,7 @@ MTU 越大 = 通知越少 = 吞吐越高。
 格式：`AT+XX=<value>`
 
 设置配置或带参执行：
-- `AT+MODE=<normal|enhanced>` - 设置录音模式（`AT+START=<mode>` 另接受旧别名 `stereo`/`merge`）
+- `AT+MODE=<normal|enhanced>` - 设置录音模式（`AT+START=<mode>` 另接受旧别名 `merge`）
 - `AT+AUTODEL=<off|0|1-30>` - 设置自动删除策略
 - `AT+BRIGHTNESS=<0-255>` - 设置 OLED 亮度
 - `AT+TIME=<unix_ts>` - 设置系统时间
@@ -478,7 +478,7 @@ AT+START=normal
 ```
 
 **参数：**
-- `mode`："normal"、"enhanced" 或 "rtc"（旧别名："stereo" = normal，"merge" = enhanced；均不区分大小写）。省略 → 当前模式。
+- `mode`："normal"、"enhanced" 或 "rtc"（旧别名："merge" = enhanced；不区分大小写）。省略 → 当前模式。
   `rtc` 启动实时流而非 SD 录音 —— 仅限 BLE，且要求文件数据特征值已订阅（见 4.8 节）。按键无法启动 RTC；按键长按松开永远走 SD 管线。
 
 **响应：**
@@ -506,7 +506,8 @@ RTC 会话额外返回模式：
 > `data` 只含 `session` id（id 尚未就绪时为空对象）。
 
 **错误情况：**
-- `{"ok":false,"msg":"invalid mode (normal/stereo/enhanced/merge)"}`（模式参数错误）
+- `{"ok":false,"msg":"invalid mode (normal/enhanced/merge/rtc)"}`（模式参数错误）
+- `{"ok":false,"msg":"Battery too low, charge first"}`（临界电量锁止；按键路径同样拒绝——震动 + "Battery Low" 画面）。录音中当原始 SoC 越过 3%（或 3.45V）会优雅停止；充电/VBUS 或恢复到 ≥8% 后解锁
 - `{"ok":false,"msg":"Already recording or invalid state"}` / `"Audio module busy"` / `"Failed to start recording"`
 - `"WiFi active, cannot record"` / `"USB MSC active, disable USB first"`（WiFi/USB 活动期间禁止录音）
 - `"RTC requires BLE connected and file data notify enabled"`（RTC 前置条件不满足）
@@ -1057,7 +1058,7 @@ AT+MODE?
 **合法值：** "normal"、"enhanced"
 
 **模式预设：**
-- **Normal**：立体声（L+R 双声道），16kbps/声道（共 32kbps），复杂度 0，无 DSP 处理，10 分钟文件分段
+- **Normal**：单声道（L+R 合并），16kbps，复杂度 0，无 DSP 处理（原始采集路径），10 分钟文件分段
 - **Enhanced**：单声道（L+R 合并），32kbps，复杂度 1，DSP 开启（降噪 + 去混响），2 分钟文件分段
 
 码率与复杂度按模式固定，构建期经 Kconfig 配置（`CONFIG_CLIP_NORMAL_BITRATE`、`CONFIG_CLIP_ENHANCED_BITRATE` 等），运行时不可改。
@@ -1400,6 +1401,8 @@ AT+PAIR?
 AT+PAIR=reset
 ```
 
+**错误情况（守卫）：** `{"ok":false,"msg":"Recording or transfer active, stop first"}`
+
 **响应（查询，已配对）：**
 ```json
 {
@@ -1449,6 +1452,10 @@ AT+PAIR=reset
 ```
 AT+FACTORY=confirm
 ```
+
+**错误情况（守卫）：**
+- `{"ok":false,"msg":"Recording or transfer active, stop first"}` —— 卡被占用时拒绝
+- `{"ok":false,"msg":"Factory reset failed (SD format) — recordings NOT erased"}` —— 设置已重置但 SD 格式化失败；**不清配对、不重启**（此前会回复 ok:true 并继续）
 
 **响应：**
 ```json
@@ -2032,6 +2039,7 @@ RTC 模式经 BLE 实时流式传输麦克风音频，不在 SD 卡写任何内�
 | `usb` | `on` / `off` | USB CDC 启用 / 禁用（插拔、10 分钟自动关、或 `AT+USB`） |
 | `storage` | `full` | SD 卡越过存储满阈值；录音被拒 |
 | `rtc` | `timeout` | RTC 会话中止 —— 启动超时内无 `AT+DOWNLOAD`（4.8 节） |
+| `battery` | `low` | 原始 SoC 越过 3%（或 3.45V）：活动录音已优雅停止，拒绝新录音直至充电/恢复 |
 | `poweroff` | `failed` | 关机被拒（ship mode 拒绝）；设备已恢复 |
 
 这是 `ble_notify_event` 来源的完整清单。

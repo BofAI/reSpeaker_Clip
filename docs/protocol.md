@@ -247,7 +247,7 @@ Execute an operation or retrieve status:
 Format: `AT+XX=<value>`
 
 Set configuration or execute with parameters:
-- `AT+MODE=<normal|enhanced>` - Set recording mode (`AT+START=<mode>` additionally accepts the legacy aliases `stereo`/`merge`)
+- `AT+MODE=<normal|enhanced>` - Set recording mode (`AT+START=<mode>` additionally accepts the legacy alias `merge`)
 - `AT+AUTODEL=<off|0|1-30>` - Set auto-delete policy
 - `AT+BRIGHTNESS=<0-255>` - Set OLED brightness
 - `AT+TIME=<unix_ts>` - Set system time
@@ -509,7 +509,7 @@ AT+START=normal
 ```
 
 **Parameters:**
-- `mode`: "normal", "enhanced", or "rtc" (legacy aliases: "stereo" = normal, "merge" = enhanced; all case-insensitive). Omitted → current mode.
+- `mode`: "normal", "enhanced", or "rtc" (legacy alias: "merge" = enhanced; case-insensitive). Omitted → current mode.
   `rtc` starts a live stream instead of an SD recording — BLE only, with the
   File Data characteristic subscribed (Section 4.8). The button cannot start
   RTC; a button hold-release always starts the SD pipeline.
@@ -539,7 +539,8 @@ RTC sessions additionally report the mode:
 > `data` contains only the `session` id (an empty object if the id isn't ready yet).
 
 **Error Cases:**
-- `{"ok":false,"msg":"invalid mode (normal/stereo/enhanced/merge)"}` (bad mode argument)
+- `{"ok":false,"msg":"invalid mode (normal/enhanced/merge/rtc)"}` (bad mode argument)
+- `{"ok":false,"msg":"Battery too low, charge first"}` (critical-battery lockout; recording also refuses over the button — buzz + "Battery Low" screen). A recording already running stops gracefully when the raw SoC crosses 3% (or 3.45V); the lockout clears on charging/VBUS or recovery to >=8%
 - `{"ok":false,"msg":"Already recording or invalid state"}` / `"Audio module busy"` / `"Failed to start recording"`
 - `"WiFi active, cannot record"` / `"USB MSC active, disable USB first"` (recording blocked while WiFi/USB active)
 - `"RTC requires BLE connected and file data notify enabled"` (RTC preconditions not met)
@@ -1125,7 +1126,7 @@ AT+MODE?
 **Valid Values:** "normal", "enhanced"
 
 **Mode Presets:**
-- **Normal**: Stereo (L+R channels), 16kbps/channel (32kbps total), complexity 0, no DSP processing, 10-minute file segments
+- **Normal**: Mono (L+R merged), 16kbps, complexity 0, no DSP processing (raw capture path), 10-minute file segments
 - **Enhanced**: Mono (L+R merged), 32kbps, complexity 1, DSP enabled (noise suppression + dereverberation), 2-minute file segments
 
 Bitrate and complexity are fixed per mode and configured at build time via Kconfig (`CONFIG_CLIP_NORMAL_BITRATE`, `CONFIG_CLIP_ENHANCED_BITRATE`, etc.). They cannot be changed at runtime.
@@ -1500,6 +1501,8 @@ AT+PAIR?
 AT+PAIR=reset
 ```
 
+**Error Case (guard):** `{"ok":false,"msg":"Recording or transfer active, stop first"}`
+
 **Response (Query, paired):**
 ```json
 {
@@ -1558,6 +1561,10 @@ Restore all settings to factory defaults.
 ```
 AT+FACTORY=confirm
 ```
+
+**Error Cases (guards):**
+- `{"ok":false,"msg":"Recording or transfer active, stop first"}` — refused while the card is held
+- `{"ok":false,"msg":"Factory reset failed (SD format) — recordings NOT erased"}` — settings were reset but the SD format failed; bonds are NOT cleared and the device does NOT reboot (previously this replied ok:true and continued)
 
 **Response:**
 ```json
@@ -2321,6 +2328,7 @@ Other state-change events use the generic two-field form
 | `usb` | `on` / `off` | USB CDC enabled / disabled (cable, 10-min auto-off, or `AT+USB`) |
 | `storage` | `full` | SD card crosses the storage-full threshold; recording is refused |
 | `rtc` | `timeout` | RTC session aborted — no `AT+DOWNLOAD` within the start timeout (Section 4.8) |
+| `battery` | `low` | Raw SoC crossed 3% (or 3.45V): active recording stopped gracefully, new recordings refused until charge/recovery |
 | `poweroff` | `failed` | Power-off rejected (ship mode refused); device recovered |
 
 This is the complete list of `ble_notify_event` sources.
