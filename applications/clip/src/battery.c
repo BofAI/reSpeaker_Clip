@@ -147,6 +147,13 @@ static int64_t post_full_until_ms;    /* hold 100% until this (unplug from full)
  * battery_vbus_present() consumers need it OUTSIDE the poll cadence. */
 static bool vbus_present_cached;
 
+/* Recording lockout thresholds (see the poll-side latch logic):
+ * latch below 3% raw SoC or 3.45V, unlock on charge/VBUS or >=8%. */
+#define BATTERY_REC_MIN_SOC     3
+#define BATTERY_REC_UNLOCK_SOC  8
+#define BATTERY_REC_MIN_MV      3450
+static atomic_t rec_lockout = ATOMIC_INIT(0);
+
 static uint32_t fg_model_crc(void)
 {
 	return crc32_ieee((const uint8_t *)&battery_model, sizeof(battery_model));
@@ -309,6 +316,15 @@ void battery_save_fg_state(void)
 bool battery_vbus_present(void)
 {
 	return vbus_present_cached;
+}
+
+/* Recording allowed? Cleared at critical battery (a graceful STOP ran
+ * there); latched until charging/VBUS or recovery — the latch is what
+ * stops a hovering SoC from flapping start/stop. VBUS alone unlocks
+ * recording (external power, the charger feeds the system). */
+bool battery_recording_allowed(void)
+{
+	return !atomic_get(&rec_lockout) || vbus_present_cached;
 }
 
 static int read_sensors(float *voltage, float *current, float *temp, int32_t *chg_status)
@@ -556,6 +572,30 @@ static void read_and_update_locked(void)
 		 */
 		bool battery_full = (percent >= BATTERY_FULL_THRESHOLD);
 		charging = charger_connected && (!charger_complete || !battery_full);
+
+		/* Recording lockout at critical battery — RAW gauge values (the
+		 * displayed % is rate-limited/latched and lags). Latch below 3%
+		 * SoC or 3.45V; clear only on charging/VBUS or recovery to >=8%
+		 * (hysteresis against flapping at the threshold). The first
+		 * crossing while recording posts a graceful STOP so files flush
+		 * and session metadata finalizes, instead of the pack dying
+		 * mid-write. VBUS exempts from the refusal (external power). */
+		if (!atomic_get(&rec_lockout)) {
+			if (percent <= BATTERY_REC_MIN_SOC ||
+			    voltage * 1000.0f <= (float)BATTERY_REC_MIN_MV) {
+				atomic_set(&rec_lockout, 1);
+				LOG_WRN("battery critical (%u%%, %dmV): recording lockout",
+					percent, (int)(voltage * 1000.0f));
+				ble_notify_event("battery", "low");
+				if (audio_is_recording()) {
+					clip_post_event(CLIP_EVENT_STOP);
+				}
+			}
+		} else if (charging || vbus_connected ||
+			   percent >= BATTERY_REC_UNLOCK_SOC) {
+			atomic_clear(&rec_lockout);
+			LOG_INF("battery recovered: recording unlocked");
+		}
 
 		/* Debug log for charging state */
 		if (charger_connected && !last_charging) {
@@ -823,7 +863,7 @@ int battery_init(void)
 	 * resumed instead of silently discarded on every reboot. */
 	fg_state_load();
 
-	LOG_INF("Battery: 240mAh, fuel gauge %s", nrf_fuel_gauge_version);
+	LOG_DBG("Battery: 240mAh, fuel gauge %s", nrf_fuel_gauge_version);
 
 	/* Read initial sensor values */
 	ret = read_sensors(&init_params.v0, &init_params.i0, &init_params.t0, &chg_status);
@@ -886,7 +926,7 @@ int battery_init(void)
 		} else {
 			fg_initialized = true;
 
-			LOG_INF("Fuel-gauge state: %s", fg_state_loaded ? "restored" : "new estimate");
+			LOG_DBG("Fuel-gauge state: %s", fg_state_loaded ? "restored" : "new estimate");
 
 			/* Seed the directional-smoothed display from the persisted value so
 			 * it resumes from the pre-reboot reading (no cross-reboot lag). */
@@ -939,7 +979,7 @@ int battery_init(void)
 	/* Initialize delayed update work for VBUS detection */
 	k_work_init_delayable(&battery_delayed_update_work, battery_delayed_update_handler);
 
-	LOG_INF("Battery init (poll=60s, fg=%s)",
+	LOG_DBG("Battery init (poll=60s, fg=%s)",
 		fg_initialized ? "enabled" : "disabled");
 
 	/* Allow read_and_update to post events now that we return to main. */

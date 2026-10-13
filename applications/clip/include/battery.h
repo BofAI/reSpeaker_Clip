@@ -47,4 +47,10 @@ void battery_save_fg_state(void);
  * on this, NOT on status.battery_charging (false once the charge completes). */
 bool battery_vbus_present(void);
 
+/* Recording allowed? Latched off at critical battery (raw SoC <=3% or
+ * <=3.45V; a graceful STOP runs there), unlocked by charging/VBUS or
+ * recovery to >=8%. VBUS alone unlocks (external power). START paths
+ * (AT + button) gate on this. */
+bool battery_recording_allowed(void);
+
 #endif /* CLIP_BATTERY_H */

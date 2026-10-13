@@ -726,6 +726,15 @@ static enum clip_event_result execute_transition(enum clip_event event,
     {
         struct clip_context *ctx = clip_get_context();
 
+        /* Critical-battery lockout: a graceful STOP already ran at 3%;
+         * refuse new recordings until charging/recovery (VBUS exempts —
+         * external power feeds the system). */
+        if (!battery_recording_allowed()) {
+            LOG_WRN("START refused: battery critical");
+            display_post_error("Battery Low");
+            return CLIP_EVENT_ERROR;
+        }
+
         if (current_start_rtc) {
             /* RTC session: pipeline only — no SD session, works on a full
              * card, but requires a BLE consumer ready to subscribe. */

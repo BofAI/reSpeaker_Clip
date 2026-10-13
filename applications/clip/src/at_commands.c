@@ -859,6 +859,13 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     enum recording_mode rec_mode;
     bool rtc_request = false;
 
+    /* Critical-battery lockout (see battery.c): answer with a clear
+     * message up-front; the event-layer guard covers the button path. */
+    if (!battery_recording_allowed()) {
+        return create_json_response(false, "Battery too low, charge first",
+                                    NULL, response, len);
+    }
+
     /* Parse mode parameter if provided */
     if (ctx->args && strlen(ctx->args) > 0) {
         char mode_str[32];

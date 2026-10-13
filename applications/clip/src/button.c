@@ -13,6 +13,7 @@
 #include "button.h"
 #include "clip_event.h"
 #include "battery.h"
+#include "display.h"
 #include "haptic.h"
 
 LOG_MODULE_REGISTER(button, CONFIG_CLIP_LOG_LEVEL);
@@ -85,7 +86,7 @@ static void button_event_callback(const struct device *dev, enum button_action a
         break;
 
     case BUTTON_LONG_PRESS:
-	LOG_INF("LONG_PRESS (>1s holding) state=%d", state);
+	LOG_DBG("LONG_PRESS (>1s holding) state=%d", state);
 	if (state == CLIP_STATE_RECORDING) {
 		/* Stop recording immediately, vibrate to confirm.
 		 * User can continue holding for power-off (LEVEL_1/2/3).
@@ -144,6 +145,14 @@ static void button_event_callback(const struct device *dev, enum button_action a
 	    clip_post_event(CLIP_EVENT_STOP);  /* STOP event handler vibrates */
 	} else if (state == CLIP_STATE_IDLE) {
 	    int ret;
+
+	    /* Critical battery: refuse the start with immediate feedback
+	     * (the event-layer guard is the backstop for other paths). */
+	    if (!battery_recording_allowed()) {
+		haptic_play_pattern(HAPTIC_ALERT);
+		display_post_error("Battery Low");
+		break;
+	    }
 
 	    /* Hold-release = SD recording START (deferred from the 1 s
 	     * threshold so continuing to hold enters power-off instead).
