@@ -250,6 +250,17 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
         goto fail;
     }
 
+    /* Husk session (no non-empty .opus): refuse the transfer, delete the
+     * husk right here, and let the AT layer answer ok:false — entering
+     * TRANSMITTING for a session with nothing to send left the host
+     * waiting on a transfer that only ever completed with zero files. */
+    if (!storage_session_has_audio(session_id)) {
+        LOG_WRN("session %s has no audio - removing husk", session_id);
+        storage_delete_session(session_id);
+        err = -ENOENT;
+        goto fail;
+    }
+
     /* Skip empty sessions (0 files) */
     if (session_info.file_count == 0) {
         LOG_INF("Empty session, skipping: %s", session_id);
@@ -752,15 +763,6 @@ process_next_file:
                     current_transfer.state = TRANSFER_STATE_COMPLETED;
                     send_transfer_complete_once(current_transfer.session_id,
                                                  (int)current_transfer.synced_files);
-                    /* Encounter-time cleanup: a session whose every file
-                     * was a deleted 0-byte husk is worthless — remove it
-                     * now (no boot sweep) so the indicator and LIST stop
-                     * seeing a phantom. */
-                    if (!storage_session_has_audio(current_transfer.session_id)) {
-                        LOG_WRN("xfer: session %s empty, removing",
-                                current_transfer.session_id);
-                        storage_delete_session(current_transfer.session_id);
-                    }
                     transfer_cleanup();
                     transfer_thread_wait_idle();
                     goto process_next_file;
