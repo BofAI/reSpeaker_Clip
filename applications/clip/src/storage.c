@@ -90,6 +90,14 @@ static K_SEM_DEFINE(file_closed_sem, 0, 1);
 /* Mutex to serialize session.json read-modify-write across threads */
 static K_MUTEX_DEFINE(session_json_mutex);
 
+/* Shared session-id window for has_unsynced/sweep — 1 KiB in .bss, NOT on
+ * the caller's stack: storage_has_unsynced_sessions() runs on the TRANSFER
+ * thread (transfer cleanup) whose 4 KiB stack overflowed with a local
+ * ids[64][16] + get_session_info frame — silent memory corruption, device
+ * froze on "phone connects and syncs". */
+static K_MUTEX_DEFINE(session_scan_mutex);
+static char session_scan_ids[64][16];
+
 /* Internal functions */
 static int update_free_space(void);
 static int create_marks_file(const char *path);
@@ -1483,8 +1491,8 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
 
 bool storage_has_unsynced_sessions(void)
 {
-	char ids[64][16];
 	int n;
+	bool unsynced = false;
 
 	/* Truthful "untransferred" check: a session counts only when it has
 	 * audio the host has not fully ACKed (synced < files). The old "any
@@ -1493,29 +1501,34 @@ bool storage_has_unsynced_sessions(void)
 	 * the oldest 64 (sorted) — beyond that the answer is
 	 * conservative-true (the newest sessions are the likely-unsynced
 	 * ones and are exactly the ones dropped by the window). */
-	n = storage_list_session_ids(ids, ARRAY_SIZE(ids));
+	k_mutex_lock(&session_scan_mutex, K_FOREVER);
+	n = storage_list_session_ids(session_scan_ids,
+				      ARRAY_SIZE(session_scan_ids));
 	if (n < 0) {
-		return false;
+		goto out;
 	}
-	if (n == (int)ARRAY_SIZE(ids)) {
-		return true; /* window full — more sessions than sampled */
+	if (n == (int)ARRAY_SIZE(session_scan_ids)) {
+		unsynced = true; /* window full — more sessions than sampled */
+		goto out;
 	}
 	for (int i = 0; i < n; i++) {
 		struct storage_session_info info;
 
-		if (storage_get_session_info(ids[i], &info) != 0) {
+		if (storage_get_session_info(session_scan_ids[i], &info) != 0) {
 			continue;
 		}
 		if (info.synced_files < info.file_count) {
-			return true;
+			unsynced = true;
+			break;
 		}
 	}
-	return false;
+out:
+	k_mutex_unlock(&session_scan_mutex);
+	return unsynced;
 }
 
 int storage_sweep_empty_sessions(void)
 {
-	char ids[64][16];
 	int n;
 	int removed = 0;
 
@@ -1524,17 +1537,20 @@ int storage_sweep_empty_sessions(void)
 	 * the first write window, aborted starts, or host-side deletions.
 	 * reuses storage_get_session_info (json first, dir-scan fallback)
 	 * and storage_delete_session (honest errors + parent prune). */
-	n = storage_list_session_ids(ids, ARRAY_SIZE(ids));
+	k_mutex_lock(&session_scan_mutex, K_FOREVER);
+	n = storage_list_session_ids(session_scan_ids,
+				      ARRAY_SIZE(session_scan_ids));
 	for (int i = 0; i < n; i++) {
 		struct storage_session_info info;
 
-		if (storage_get_session_info(ids[i], &info) == 0 &&
+		if (storage_get_session_info(session_scan_ids[i], &info) == 0 &&
 		    info.file_count == 0 && info.total_bytes == 0) {
-			if (storage_delete_session(ids[i]) == 0) {
+			if (storage_delete_session(session_scan_ids[i]) == 0) {
 				removed++;
 			}
 		}
 	}
+	k_mutex_unlock(&session_scan_mutex);
 	if (removed > 0) {
 		LOG_INF("swept %d empty sessions", removed);
 	}
