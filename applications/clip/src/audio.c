@@ -351,7 +351,7 @@ int audio_stop_recording(void)
     stop_requested = true;
 
     k_mutex_unlock(&audio_state_mutex);
-    LOG_INF("Recording stop requested");
+    LOG_DBG("Recording stop requested");
 
     /* Wait for audio thread to finish cleanup (file close + sync on slow SD) */
     if (k_sem_take(&stop_done_sem, K_MSEC(5000)) != 0) {

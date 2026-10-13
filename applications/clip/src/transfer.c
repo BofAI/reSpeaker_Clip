@@ -253,12 +253,22 @@ int transfer_start(const char *session_id, const char *filename, struct transpor
     /* Husk session (no non-empty .opus): refuse the transfer, delete the
      * husk right here, and let the AT layer answer ok:false — entering
      * TRANSMITTING for a session with nothing to send left the host
-     * waiting on a transfer that only ever completed with zero files. */
-    if (!storage_session_has_audio(session_id)) {
-        LOG_WRN("session %s has no audio - removing husk", session_id);
-        storage_delete_session(session_id);
-        err = -ENOENT;
-        goto fail;
+     * waiting on a transfer that only ever completed with zero files.
+     * NEVER the ACTIVE recording session: the open file's directory
+     * size reads 0 until its first fs_sync/close, so has_audio() is
+     * blind for it — and live-syncing the active session is exactly
+     * continuous mode, a legitimate transfer. */
+    {
+        const char *recording_session = audio_get_session_id();
+
+        if (!storage_session_has_audio(session_id) &&
+            (recording_session == NULL ||
+             strcmp(recording_session, session_id) != 0)) {
+            LOG_WRN("session %s has no audio - removing husk", session_id);
+            storage_delete_session(session_id);
+            err = -ENOENT;
+            goto fail;
+        }
     }
 
     /* Skip empty sessions (0 files) */

@@ -921,7 +921,7 @@ int battery_init(void)
 		    (int)voltage_soc_estimate(init_params.v0) -
 			    (int)fg_state_record.displayed_soc >=
 			    BATTERY_DISPLAY_REANCHOR_THRESHOLD) {
-			LOG_WRN("stale fg state: %.3fV vs seed %u%% -> new estimate",
+			LOG_DBG("stale fg state: %.3fV vs seed %u%% -> new estimate",
 				init_params.v0,
 				(unsigned int)fg_state_record.displayed_soc);
 			fg_state_loaded = false;
