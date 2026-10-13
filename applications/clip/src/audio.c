@@ -625,7 +625,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
     /* Calculate actual bitrate for logging */
     uint32_t actual_bitrate = (current_mode == AUDIO_MODE_STEREO) ?
         CONFIG_CLIP_NORMAL_BITRATE * 2 : CONFIG_CLIP_ENHANCED_BITRATE;
-    LOG_INF("rec: %s %ukbps %s",
+    LOG_DBG("rec: %s %ukbps %s",
         (current_mode == AUDIO_MODE_STEREO) ? "stereo" : "mono",
         actual_bitrate/1000, current_session_id);
     return 0;
@@ -1098,7 +1098,7 @@ static int init_opus_encoder(void)
     encoder_params.channels = opus_channels;
     encoder_params.initialized = true;
 
-    LOG_INF("opus: %dch %ukbps c=%u %s",
+    LOG_DBG("opus: %dch %ukbps c=%u %s",
         opus_channels, actual_bitrate / 1000, effective_complexity,
         (current_mode == AUDIO_MODE_STEREO) ? "stereo" : "mono");
 

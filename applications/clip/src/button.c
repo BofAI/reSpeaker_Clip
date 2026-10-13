@@ -203,7 +203,7 @@ int button_init(void)
         return err;
     }
 
-    LOG_INF("Button handler initialized");
+    LOG_DBG("Button handler initialized");
     return 0;
 }
 
