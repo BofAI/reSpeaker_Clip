@@ -56,6 +56,19 @@ static uint8_t write_buffer[CONFIG_CLIP_STORAGE_CHUNK_SIZE];
 static uint32_t buffer_pos = 0;
 static struct fs_file_t *current_file_ptr = NULL;
 
+/* Sentinel for update_session_json(): mid-recording rollover update —
+ * keep the on-disk duration (the session is still growing) and keep
+ * recording:true (the STOP path passes a real duration and closes it). */
+#define STORAGE_KEEP_DURATION ((uint32_t)-1)
+
+/* Time of the last periodic fs_sync of the open file. Data reaches the
+ * media on every 4 KiB flush, but the FAT directory entry (file size!)
+ * is only durable after fs_sync — previously only at segment close. A
+ * power cut mid-segment left the file 0 bytes / truncated on the card
+ * even though its clusters held audio. 15 s bounds the exposure. */
+#define STORAGE_PERIODIC_SYNC_MS 15000
+static int64_t last_periodic_sync_ms;
+
 /* Statistics */
 static uint32_t total_chunks = 0;
 static uint64_t total_bytes = 0;
@@ -595,7 +608,7 @@ int storage_create_session(const char *session_id, uint8_t channels,
         return rc;
     }
 
-    LOG_INF("Creating session: %s", session_id);
+    LOG_DBG("Creating session: %s", session_id);
     rc = create_marks_file(marks_path);
     if (rc != 0) {
         return rc;
@@ -739,6 +752,15 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint3
         }
         fs_close(current_file_ptr);
         current_file_ptr = NULL;
+
+        /* Segment rollover: make the on-disk file count durable. A power
+         * cut previously left session.json at files:0 for the whole
+         * recording (only STOP updated it) — the LIST fallback rescans
+         * the directory, but anything trusting the json saw zero files.
+         * Keeps recording:true (STORAGE_KEEP_DURATION). */
+        (void)update_session_json(session_id, STORAGE_KEEP_DURATION,
+                                  chunk_index - 1,
+                                  total_bytes - session_bytes_base);
     }
 
     /* Initialize file structure */
@@ -842,6 +864,20 @@ int storage_write_frame(struct storage_file *file, const uint8_t *data, uint32_t
     file->bytes_written += len + 2; /* +2 for length header */
     file->frames_written++;
     total_bytes += len + 2;
+
+    /* Periodic sync: make the FAT directory entry (file size) durable
+     * without waiting for the segment close (see
+     * STORAGE_PERIODIC_SYNC_MS). Audio thread context: fs_sync on SPI
+     * SD is a few ms every 15 s — acceptable next to the 4 KiB flushes
+     * that already run here. */
+    if (current_file_ptr &&
+        k_uptime_get() - last_periodic_sync_ms >= STORAGE_PERIODIC_SYNC_MS) {
+        if (buffer_pos > 0) {
+            (void)flush_write_buffer();
+        }
+        (void)fs_sync(current_file_ptr);
+        last_periodic_sync_ms = k_uptime_get();
+    }
 
     return 0;
 }
@@ -1815,7 +1851,30 @@ static int update_session_json(const char *session_id, uint32_t duration_sec,
         }
     }
 
-    /* Write updated JSON with all fields, set recording to false */
+    /* Duration: a real value formats here; the rollover sentinel
+     * preserves what is already on disk (see STORAGE_KEEP_DURATION). */
+    char duration_str[16];
+    if (duration_sec == STORAGE_KEEP_DURATION) {
+        char existing[16] = "0";
+        if (rc == 0 && bytes_read > 0) {
+            char *p = strstr(json_buf, "\"duration\":");
+            if (p) {
+                strncpy(existing, p + 11, sizeof(existing) - 1);
+                existing[sizeof(existing) - 1] = '\0';
+                char *nl = existing;
+                while (*nl >= '0' && *nl <= '9') { nl++; }
+                *nl = '\0';
+            }
+        }
+        snprintf(duration_str, sizeof(duration_str), "%s", existing);
+    } else {
+        snprintf(duration_str, sizeof(duration_str), "%u", duration_sec);
+    }
+    /* Rollover updates keep recording:true (only STOP closes it) */
+    const char *recording_str =
+        (duration_sec == STORAGE_KEEP_DURATION) ? "true" : "false";
+
+    /* Write updated JSON with all fields */
     fs_file_t_init(&file);
     rc = fs_open(&file, json_path, FS_O_CREATE | FS_O_WRITE);
     if (rc != 0)
@@ -1828,18 +1887,19 @@ static int update_session_json(const char *session_id, uint32_t duration_sec,
     len = snprintf(json_buf, sizeof(json_buf),
                    "{\n"
                    "  \"id\": \"%s\",\n"
-                   "  \"duration\": %u,\n"
+                   "  \"duration\": %s,\n"
                    "  \"files\": %u,\n"
                    "  \"size\": %u,\n"
                    "  \"synced\": %s,\n"
                    "  \"channels\": %s,\n"
                    "  \"sample_rate\": %s,\n"
                    "  \"mode\": \"%s\",\n"
-                   "  \"recording\": false\n"
+                   "  \"recording\": %s\n"
                    "}\n",
-                   session_id, duration_sec, chunk_count,
+                   session_id, duration_str, chunk_count,
                    (unsigned int)session_bytes,
-                   synced_str, channels_str, sample_rate_str, mode_str);
+                   synced_str, channels_str, sample_rate_str, mode_str,
+                   recording_str);
 
     if (len < 0 || len >= (int)sizeof(json_buf))
     {
