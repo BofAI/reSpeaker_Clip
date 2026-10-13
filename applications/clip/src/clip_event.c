@@ -102,7 +102,11 @@ struct clip_event_item {
  * semaphore directly; a dedicated thread with its own stack runs the
  * shutdown sequence without depending on the event thread. */
 static K_SEM_DEFINE(shutdown_sem, 0, 1);
-#define SHUTDOWN_THREAD_STACK 2048
+/* 4096: this thread runs the FULL stop chain (audio_stop_recording →
+ * storage close/session.json with ~1 KiB frames, battery fg save →
+ * settings/LittleFS write) — 2048 was flagged tight and is the same
+ * stack-overflow class as the transfer-thread freeze. Was 2048. */
+#define SHUTDOWN_THREAD_STACK 4096
 static K_THREAD_STACK_DEFINE(shutdown_thread_stack, SHUTDOWN_THREAD_STACK);
 static struct k_thread shutdown_thread_data;
 static void shutdown_thread_fn(void);
