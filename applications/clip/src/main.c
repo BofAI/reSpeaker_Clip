@@ -235,10 +235,9 @@ int clip_init(void)
         LOG_WRN("Storage init failed: %d", err);
         /* Continue anyway - storage is optional */
     } else {
-        /* SD card mounted — sweep json-only/empty phantom sessions first
-         * (power-cut windows, aborted starts, host-side deletions), then
-         * check for unsynced sessions against the cleaned card. */
-        (void)storage_sweep_empty_sessions();
+        /* SD card mounted — restore the untransferred indicator from the
+         * persisted flag (no card walk; boot stays fast). Empty/phantom
+         * sessions are cleaned at encounter time by the transfer path. */
         display_check_untransferred();
 
 #ifdef CONFIG_LOG_BACKEND_FS

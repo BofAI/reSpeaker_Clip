@@ -121,7 +121,10 @@ static K_MUTEX_DEFINE(session_json_mutex);
  * (only while it is true, e.g. after a transfer completes) clears it.
  * Boot reads the flag instead of scanning the card. Worst-case drift is
  * conservative (flag stays true until the next verification). */
-#define UNSYNCED_KEY "storage/unsynced"
+/* v2: the v1 key was poisoned by the 3-byte-read scan bug (interim test
+ * builds only) — a fresh key forces the one-time boot seed scan, which
+ * now reads correctly and converges the flag to card truth. */
+#define UNSYNCED_KEY "storage/unsynced2"
 static bool unsynced_cached;
 static bool unsynced_loaded;
 
@@ -433,7 +436,6 @@ int storage_init(void)
      * feature / flag lost: seed it once with a verification walk. */
     k_work_init_delayable(&unsynced_save_work_d, unsynced_save_work_handler);
     settings_load_subtree("storage");
-    LOG_WRN("unsynced flag: loaded=%d cached=%d", unsynced_loaded, unsynced_cached);
     if (!unsynced_loaded) {
         (void)storage_has_unsynced_sessions(); /* scans + persists */
     }
@@ -1604,7 +1606,6 @@ bool storage_has_unsynced_sessions(void)
 	k_mutex_lock(&session_scan_mutex, K_FOREVER);
 	res = scan_unsynced_newest();
 	k_mutex_unlock(&session_scan_mutex);
-	LOG_WRN("unsynced scan: %d (flag was %d)", res, unsynced_cached);
 	storage_set_unsynced(res);
 	return res;
 }
@@ -1731,6 +1732,59 @@ static bool scan_unsynced_newest(void)
     int checks = 0;
 
     return scan_level_unsynced(STORAGE_BASE_PATH, 0, &checks);
+}
+
+/* True if the session directory holds at least one non-empty .opus
+ * (group-subdir walk). Used by the transfer completion to remove husk
+ * sessions whose every file was a deleted 0-byte artifact. */
+int storage_session_has_audio(const char *session_id)
+{
+    char dir_path[STORAGE_PATH_MAX];
+    struct fs_dir_t dp;
+    struct fs_dirent ent;
+    bool has = false;
+    int rc;
+
+    if (!sd_mounted || validate_session_id(session_id) != 0) {
+        return 0;
+    }
+    rc = build_bucket_session_dir(session_id, dir_path, sizeof(dir_path));
+    if (rc != 0) {
+        return 0;
+    }
+    fs_dir_t_init(&dp);
+    if (fs_opendir(&dp, dir_path) != 0) {
+        return 0;
+    }
+    while (!has && fs_readdir(&dp, &ent) == 0 && ent.name[0] != 0) {
+        if (ent.type != FS_DIR_ENTRY_DIR || ent.name[0] == '.') {
+            continue;
+        }
+        char subdir[STORAGE_PATH_MAX];
+        struct fs_dir_t sub;
+        struct fs_dirent se;
+
+        if (storage_path_format(subdir, sizeof(subdir), "%s/%s",
+                                dir_path, ent.name) != 0) {
+            continue;
+        }
+        fs_dir_t_init(&sub);
+        if (fs_opendir(&sub, subdir) != 0) {
+            continue;
+        }
+        while (fs_readdir(&sub, &se) == 0 && se.name[0] != 0) {
+            size_t slen = strlen(se.name);
+
+            if (slen == 9 && strcmp(se.name + 4, ".opus") == 0 &&
+                se.size > 0) {
+                has = true;
+                break;
+            }
+        }
+        fs_closedir(&sub);
+    }
+    fs_closedir(&dp);
+    return has;
 }
 
 int storage_sweep_empty_sessions(void)

@@ -738,10 +738,10 @@ process_next_file:
 
         /* Open first file if not already open */
         if (!transfer_file_open) {
-            LOG_INF("xfer: next file (idx=%u/%u)",
+            LOG_DBG("xfer: next file (idx=%u/%u)",
                 current_transfer.file_index, current_transfer.total_files);
             ret = transfer_next_file();
-            LOG_INF("xfer: next_file ret=%d", ret);
+            LOG_DBG("xfer: next_file ret=%d", ret);
             if (ret == 0) {
                 consecutive_file_errors = 0;
             }
@@ -752,6 +752,15 @@ process_next_file:
                     current_transfer.state = TRANSFER_STATE_COMPLETED;
                     send_transfer_complete_once(current_transfer.session_id,
                                                  (int)current_transfer.synced_files);
+                    /* Encounter-time cleanup: a session whose every file
+                     * was a deleted 0-byte husk is worthless — remove it
+                     * now (no boot sweep) so the indicator and LIST stop
+                     * seeing a phantom. */
+                    if (!storage_session_has_audio(current_transfer.session_id)) {
+                        LOG_WRN("xfer: session %s empty, removing",
+                                current_transfer.session_id);
+                        storage_delete_session(current_transfer.session_id);
+                    }
                     transfer_cleanup();
                     transfer_thread_wait_idle();
                     goto process_next_file;
@@ -1167,11 +1176,17 @@ open_file:
      * not be mutated from the transfer thread, and deleting a 0-byte
      * .opus while session.json still claims files:N turns the session
      * into a json-only phantom the scan trusts forever. */
+    /* 0-byte file: DELETE it on encounter and advance. The old
+     * -ENOENT told the caller "session complete" -> the app received
+     * TRANSFER_DONE with zero files and re-issued DOWNLOAD forever.
+     * -EAGAIN is the existing "skipped, try next immediately" path. */
     if (entry.size == 0) {
-        LOG_WRN("Empty file skipped: %s", current_transfer.current_file);
+        LOG_WRN("Empty file deleted: %s", current_transfer.current_file);
         fs_close(&transfer_file);
+        fs_unlink(filepath);
         current_transfer.current_file[0] = '\0';
-        return -ENOENT;
+        current_transfer.file_index++;
+        return -EAGAIN;
     }
 
     current_transfer.file_index++;

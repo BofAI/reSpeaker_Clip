@@ -251,7 +251,7 @@ void ble_request_rtc_conn_params(bool rtc)
     int err = bt_conn_le_param_update(ble_ctx.conn,
                                       rtc ? &conn_params_rtc : &conn_params_default);
     if (err && err != -EALREADY) {
-        LOG_WRN("conn param update (%s) failed: %d", rtc ? "rtc" : "default", err);
+        LOG_DBG("conn param update (%s) failed: %d", rtc ? "rtc" : "default", err);
     } else {
         rtc_params_active = rtc;
     }
@@ -369,7 +369,7 @@ static void generate_device_name(void)
     uint16_t id_suffix = device_id_low & 0xFFFF;
     snprintf(ble_ctx.device_name, sizeof(ble_ctx.device_name),
              "Clip %04X", id_suffix);
-    LOG_INF("Device name: %s", ble_ctx.device_name);
+    LOG_DBG("Device name: %s", ble_ctx.device_name);
 }
 
 /* Advertising fast→slow timeout handler */

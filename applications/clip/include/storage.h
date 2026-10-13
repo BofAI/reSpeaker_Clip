@@ -359,8 +359,12 @@ int storage_delete_session(const char *session_id);
 int storage_abort_session(const char *session_id);
 
 /* Boot-time GC: delete sessions with zero audio files. Returns the
- * number removed. */
+ * number removed. (Currently unreferenced — encounter-time cleanup in
+ * the transfer path replaced the boot sweep.) */
 int storage_sweep_empty_sessions(void);
+
+/* True if the session holds at least one non-empty .opus file. */
+int storage_session_has_audio(const char *session_id);
 
 /**
  * @brief Format SD card
