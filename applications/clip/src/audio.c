@@ -546,7 +546,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
      * The 10ms mic stabilization delay also serves as CPU frequency
      * settling time.
      */
-    LOG_INF("Boosting CPU for recording");
+    LOG_DBG("Boosting CPU for recording");
     clip_cpu_boost_acquire();
 
     /* Power on microphone with delay for stabilization */
@@ -1176,7 +1176,7 @@ static int init_speex_preprocessor(void)
 
     dsp_params.initialized = true;
 
-    LOG_INF("dsp: noise=%ddB drv=%d agc=integer",
+    LOG_DBG("dsp: noise=%ddB drv=%d agc=integer",
             CONFIG_CLIP_DEFAULT_NOISE,
             IS_ENABLED(CONFIG_CLIP_DEFAULT_DEREVERB) ? 1 : 0);
 

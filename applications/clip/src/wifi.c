@@ -144,14 +144,14 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
 		}
 		else
 		{
-			LOG_INF("WiFi AP enabled");
+			LOG_DBG("WiFi AP enabled");
 			ap_running = true;
 		}
 		k_sem_give(&ap_enabled_sem);
 		break;
 	}
 	case NET_EVENT_WIFI_AP_DISABLE_RESULT:
-		LOG_INF("WiFi AP disabled");
+		LOG_DBG("WiFi AP disabled");
 		ap_running = false;
 		sta_connected = false;
 		k_sem_give(&ap_disabled_sem);
