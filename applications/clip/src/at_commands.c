@@ -681,6 +681,14 @@ static int cmd_factory_handler(struct at_cmd_ctx *ctx, char *response, size_t le
         return create_json_response(false, "Add 'confirm' or 'yes' to proceed", NULL, response, len);
     }
 
+    /* Destructive guard: formatting under an active recording/transfer
+     * fails (f_mkfs on a held volume) — and previously still replied
+     * ok:true while the erase was silently skipped. */
+    if (audio_is_recording() || transfer_is_active()) {
+        return create_json_response(false, "Recording or transfer active, stop first",
+                                    NULL, response, len);
+    }
+
     /* Perform factory reset (clear LittleFS config) */
     int err = config_factory_reset();
     if (err) {
@@ -705,15 +713,20 @@ static int cmd_factory_handler(struct at_cmd_ctx *ctx, char *response, size_t le
     /* Format SD card (clear FATFS recordings) */
     err = storage_format_card();
 
-    /* Send response before clearing bonds (which may drop BLE link) */
-    char msg[64];
     if (err) {
-        LOG_WRN("SD format fail (factory) %d", err);
-        snprintf(msg, sizeof(msg), "Factory reset (SD format failed: %d), rebooting...", err);
-    } else {
-        snprintf(msg, sizeof(msg), "Factory reset complete, rebooting...");
+        /* Format failed: settings were already reset, but the SD erase did
+         * NOT happen. Reply failure and do NOT clear bonds or reboot — the
+         * half-reset state stays visible and the recordings are provably
+         * intact (previously this replied ok:true and continued). */
+        LOG_ERR("Factory reset: SD format %d", err);
+        return create_json_response(false,
+            "Factory reset failed (SD format) — recordings NOT erased",
+            NULL, response, len);
     }
-    int ret = create_json_response(true, msg, NULL, response, len);
+
+    /* Send response before clearing bonds (which may drop BLE link) */
+    int ret = create_json_response(true, "Factory reset complete, rebooting...",
+                                   NULL, response, len);
 
     /* Schedule: clear bonds then reboot */
     schedule_reboot(500, true);
@@ -759,6 +772,13 @@ static int cmd_pair_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
         /* AT+PAIR=reset - Clear bonds and reboot */
         if (!ctx->args || strcmp(ctx->args, "reset") != 0) {
             return create_json_response(false, "Use AT+PAIR=reset", NULL, response, len);
+        }
+
+        /* Destructive guard: the reset wipes the SD card in the background
+         * — refuse while a recording or transfer holds the card. */
+        if (audio_is_recording() || transfer_is_active()) {
+            return create_json_response(false, "Recording or transfer active, stop first",
+                                        NULL, response, len);
         }
 
         /* Clear and persist pairing configuration before acknowledging the
