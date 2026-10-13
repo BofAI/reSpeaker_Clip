@@ -215,6 +215,9 @@ static void process_command(struct at_queue_item *item)
         } else { \
             transport_send_to(item->transport_type, (uint8_t *)at_ctx.response_buffer, resp_len); \
         } \
+        /* AT trace (WRN so it survives this module's level): command +
+         * response head. %.60s stops LIST-style floods at the log line. */ \
+        LOG_WRN("AT[%d] %s -> %.60s", item->transport_type, cmd_name, at_ctx.response_buffer); \
     } while(0)
 
     /* Clear response buffer */

@@ -832,7 +832,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                             LOG_ERR("DMIC recovery failed: %d", ret);
                         } else {
                             dmic_flush_initial();
-                            LOG_INF("DMIC recovered");
+                            LOG_DBG("DMIC recovered");
                         }
                     }
                     continue;
@@ -1025,7 +1025,7 @@ create_new_segment:
         /* Signal that stop is complete */
         k_sem_give(&stop_done_sem);
 
-        LOG_INF("rec done: %u frm %us %uKB",
+        LOG_DBG("rec done: %u frm %us %uKB",
             stats.frames_encoded,
             (unsigned int)(stats.recording_time_ms / 1000),
             (unsigned int)(stats.total_bytes / 1024));

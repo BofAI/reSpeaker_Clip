@@ -872,7 +872,7 @@ int battery_init(void)
 		/* Continue with basic battery monitoring */
 	} else {
 		/* Print initial readings (sensor convention: I negative = discharging) */
-		LOG_INF("init: V=%.3f I=%.3f T=%.1f chg=0x%02x",
+		LOG_DBG("init: V=%.3f I=%.3f T=%.1f chg=0x%02x",
 			init_params.v0, init_params.i0, init_params.t0,
 			(unsigned int)chg_status);
 
