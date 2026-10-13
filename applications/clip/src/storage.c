@@ -144,20 +144,34 @@ static int unsynced_settings_set(const char *key, size_t len,
 SETTINGS_STATIC_HANDLER_DEFINE(unsynced, UNSYNCED_KEY, NULL,
                                unsynced_settings_set, NULL, NULL);
 
-static void storage_set_unsynced(bool v)
-{
-    uint8_t val = v ? 1U : 0U;
-    int rc;
+/* Persistence is DEFERRED to the system workqueue: storage_create_session
+ * calls this on the AUDIO thread inside the recording-start SD burst, and a
+ * synchronous LittleFS write (~100-300 ms) there stalled the pipeline past
+ * the DMIC starvation threshold at every start. RAM flag is immediate
+ * (indicator semantics unchanged); coalesced write follows. Drift window:
+ * a power cut before the deferred write persists loses one flag update —
+ * the next verification walk self-heals it (conservative direction). */
+static struct k_work unsynced_save_work;
 
-    if (unsynced_loaded && unsynced_cached == v) {
-        return; /* unchanged - skip the LittleFS write */
-    }
-    unsynced_cached = v;
-    unsynced_loaded = true;
-    rc = settings_save_one(UNSYNCED_KEY, &val, sizeof(val));
+static void unsynced_save_work_handler(struct k_work *w)
+{
+    uint8_t val = unsynced_cached ? 1U : 0U;
+    int rc = settings_save_one(UNSYNCED_KEY, &val, sizeof(val));
+
+    ARG_UNUSED(w);
     if (rc != 0) {
         LOG_WRN("unsynced flag save %d", rc);
     }
+}
+
+static void storage_set_unsynced(bool v)
+{
+    if (unsynced_loaded && unsynced_cached == v) {
+        return; /* unchanged - no write at all */
+    }
+    unsynced_cached = v;
+    unsynced_loaded = true;
+    k_work_submit(&unsynced_save_work);
 }
 
 /* Shared session-id window for has_unsynced/sweep — 1 KiB in .bss, NOT on
@@ -413,6 +427,7 @@ int storage_init(void)
     /* Restore the persisted untransferred flag (the indicator's fast
      * path - replaces the boot-time card scan). First boot after this
      * feature / flag lost: seed it once with a verification walk. */
+    k_work_init(&unsynced_save_work, unsynced_save_work_handler);
     settings_load_subtree("storage");
     if (!unsynced_loaded) {
         (void)storage_has_unsynced_sessions(); /* scans + persists */
