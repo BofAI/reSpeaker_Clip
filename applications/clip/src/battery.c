@@ -376,7 +376,17 @@ static int charge_status_inform(int32_t chg_status)
 static bool poll_vbus_status(void)
 {
 	struct sensor_value val;
-	int ret = sensor_channel_get(charger_dev, SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS, &val);
+	int ret;
+
+	/* MUST go through sensor_attr_get(VBUS_PRESENT): channel_get returns
+	 * the RAW VBUSSTATUS register (a bitfield of presence/current-limit/
+	 * over-/under-voltage flags) and "!= 0" misread any set status bit
+	 * as VBUS present — power-off was refused on battery ("USB power
+	 * present" false positive). The attr variant applies the presence
+	 * mask inside the driver. */
+	ret = sensor_attr_get(charger_dev,
+			      SENSOR_CHAN_NPM13XX_CHARGER_VBUS_STATUS,
+			      SENSOR_ATTR_NPM13XX_CHARGER_VBUS_PRESENT, &val);
 	if (ret < 0) {
 		return false;
 	}
