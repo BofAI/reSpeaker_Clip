@@ -21,6 +21,7 @@
 
 #include "storage.h"
 #include "transfer.h"
+#include "audio.h"
 
 LOG_MODULE_REGISTER(storage, CONFIG_CLIP_LOG_LEVEL);
 
@@ -33,6 +34,31 @@ static struct fs_mount_t mp = {
 };
 static bool sd_mounted = false;
 static bool sd_powered = false;
+
+/* Runtime SD recovery: a mid-op storm (transfer dying during a stop,
+ * bus glitch) can wedge the card/stack into permanent EIO with ~20-30 s
+ * timeouts per operation until reboot. Count consecutive EIO on the hot
+ * paths; past the threshold drop the mounted flag so the next access
+ * lazily power-cycles the card (storage_ensure_mounted -> full LDO2
+ * off/on + re-init). Passive by design: no rail yanking while an
+ * operation might still be in flight. */
+#define SD_EIO_RECOVER_THRESHOLD 8
+static atomic_t sd_consecutive_eio;
+
+static void storage_note_sd_result(int rc)
+{
+    if (rc == 0) {
+        atomic_set(&sd_consecutive_eio, 0);
+        return;
+    }
+    if (rc == -EIO && sd_mounted &&
+        atomic_inc(&sd_consecutive_eio) + 1 >= SD_EIO_RECOVER_THRESHOLD) {
+        LOG_ERR("SD persistent EIO - marking unmounted for power-cycle "
+                "remount on next access");
+        atomic_set(&sd_consecutive_eio, 0);
+        sd_mounted = false;
+    }
+}
 static bool sd_full = false;     /* latched on write failure; cleared when free space recovers */
 
 /* SD power-gating handles: LDO2 rail, SPI4 bus, and CS pin parking */
@@ -63,13 +89,12 @@ static struct fs_file_t *current_file_ptr = NULL;
  * recording:true (the STOP path passes a real duration and closes it). */
 #define STORAGE_KEEP_DURATION ((uint32_t)-1)
 
-/* Time of the last periodic fs_sync of the open file. Data reaches the
- * media on every 4 KiB flush, but the FAT directory entry (file size!)
- * is only durable after fs_sync — previously only at segment close. A
- * power cut mid-segment left the file 0 bytes / truncated on the card
- * even though its clusters held audio. 15 s bounds the exposure. */
-#define STORAGE_PERIODIC_SYNC_MS 15000
-static int64_t last_periodic_sync_ms;
+/* Durability note: data reaches the media on every 4 KiB flush; the FAT
+ * directory entry (file size) is synced at every segment close (the
+ * pre-0.1.5 behavior). A mid-segment fs_sync from THIS thread was tried
+ * and reverted: it stalled the audio pipeline >40 ms (encoder window
+ * 28 ms, DMIC starvation timeouts every cycle) — power-cut exposure of
+ * one segment's metadata is the accepted trade. */
 
 /* Statistics */
 static uint32_t total_chunks = 0;
@@ -808,9 +833,11 @@ static int flush_write_buffer(void)
     if (written != buffer_pos)
     {
         LOG_ERR("Buffer flush incomplete: %zd != %u", written, buffer_pos);
+        storage_note_sd_result(-EIO);
         sd_full = true;
         return -EIO;
     }
+    storage_note_sd_result(0);
 
     buffer_pos = 0;
     return 0;
@@ -950,21 +977,7 @@ int storage_write_frame(struct storage_file *file, const uint8_t *data, uint32_t
     file->bytes_written += len + 2; /* +2 for length header */
     file->frames_written++;
     total_bytes += len + 2;
-
-    /* Periodic sync: make the FAT directory entry (file size) durable
-     * without waiting for the segment close (see
-     * STORAGE_PERIODIC_SYNC_MS). Audio thread context: fs_sync on SPI
-     * SD is a few ms every 15 s — acceptable next to the 4 KiB flushes
-     * that already run here. */
-    if (current_file_ptr && !transfer_is_active() &&
-        k_uptime_get() - last_periodic_sync_ms >= STORAGE_PERIODIC_SYNC_MS) {
-        if (buffer_pos > 0) {
-            (void)flush_write_buffer();
-        }
-        (void)fs_sync(current_file_ptr);
-        last_periodic_sync_ms = k_uptime_get();
-    }
-
+    storage_note_sd_result(0);
     return 0;
 }
 
@@ -1550,6 +1563,15 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
 bool storage_has_unsynced_sessions(void)
 {
 	bool res;
+
+	/* Recording active: unsynced audio exists by definition — answer
+	 * without touching the card. This also keeps the transfer-cleanup
+	 * verification scan OFF the SD while a recording is stopping (the
+	 * exact contention window that stretched stops to 5-8 s when a
+	 * transfer died concurrently). */
+	if (audio_is_recording()) {
+		return true;
+	}
 
 	/* Fast path: persisted flag false -> no unsynced audio, no card
 	 * access at all. Flag true (or first boot, never stored) ->
