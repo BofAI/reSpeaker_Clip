@@ -640,6 +640,24 @@ int storage_close_session(const char *session_id, uint32_t duration_sec,
     LOG_INF("session close: %s chunks=%u dur=%us",
             session_id, chunk_count, duration_sec);
 
+    /* Zero audio files (first file create failed and was aborted, or an
+     * immediate stop before the first encoded frame): keeping the dir
+     * would leave a phantom "untransferred" session forever — session.json
+     * is the only thing the scan qualifies sessions by. Remove the tree. */
+    if (chunk_count == 0) {
+        LOG_INF("session %s closed with 0 files, removing", session_id);
+        if (strcmp(current_session_id, session_id) == 0)
+        {
+            current_session_id[0] = '\0';
+        }
+        if (storage_delete_session(session_id) != 0) {
+            /* -EBUSY can't happen (current cleared); anything else leaves
+             * the dir — the boot sweep finishes the job. */
+            LOG_WRN("empty-session remove failed, sweep will retry");
+        }
+        return 0;
+    }
+
     /* Update session.json with final values */
     update_session_json(session_id, duration_sec, chunk_count, session_bytes);
 
@@ -1464,13 +1482,62 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
 
 bool storage_has_unsynced_sessions(void)
 {
-	char id[16];
+	char ids[64][16];
+	int n;
 
-	/* "Untransferred" indicator: any session present counts, instead of
-	 * reading each session.json to compare synced_files vs file_count.
-	 * scan_session_ids stops at the first session found (max_ids=1), so this
-	 * is O(1) even with thousands of sessions — no per-session reads. */
-	return storage_list_session_ids(&id, 1) > 0;
+	/* Truthful "untransferred" check: a session counts only when it has
+	 * audio the host has not fully ACKed (synced < files). The old "any
+	 * session.json counts" rule lit the indicator for sessions the app
+	 * had fully synced but kept on device by design. The id window is
+	 * the oldest 64 (sorted) — beyond that the answer is
+	 * conservative-true (the newest sessions are the likely-unsynced
+	 * ones and are exactly the ones dropped by the window). */
+	n = storage_list_session_ids(ids, ARRAY_SIZE(ids));
+	if (n < 0) {
+		return false;
+	}
+	if (n == (int)ARRAY_SIZE(ids)) {
+		return true; /* window full — more sessions than sampled */
+	}
+	for (int i = 0; i < n; i++) {
+		struct storage_session_info info;
+
+		if (storage_get_session_info(ids[i], &info) != 0) {
+			continue;
+		}
+		if (info.synced_files < info.file_count) {
+			return true;
+		}
+	}
+	return false;
+}
+
+int storage_sweep_empty_sessions(void)
+{
+	char ids[64][16];
+	int n;
+	int removed = 0;
+
+	/* Boot-time GC: delete sessions whose metadata says (or whose
+	 * directory scan reveals) zero audio — produced by power cuts in
+	 * the first write window, aborted starts, or host-side deletions.
+	 * reuses storage_get_session_info (json first, dir-scan fallback)
+	 * and storage_delete_session (honest errors + parent prune). */
+	n = storage_list_session_ids(ids, ARRAY_SIZE(ids));
+	for (int i = 0; i < n; i++) {
+		struct storage_session_info info;
+
+		if (storage_get_session_info(ids[i], &info) == 0 &&
+		    info.file_count == 0 && info.total_bytes == 0) {
+			if (storage_delete_session(ids[i]) == 0) {
+				removed++;
+			}
+		}
+	}
+	if (removed > 0) {
+		LOG_INF("swept %d empty sessions", removed);
+	}
+	return removed;
 }
 
 int storage_list_chunks(const char *session_id, uint32_t *chunks, int max_chunks, int skip)
@@ -1610,6 +1677,20 @@ int storage_delete_session(const char *session_id)
     prune_empty_parents(session_id);
 
     return 0;
+}
+
+/* Tear down the session that was just created at recording START (first
+ * file create failed): remove the tree so no json-only phantom remains.
+ * Safe for the current session (clears the current pointer first). */
+int storage_abort_session(const char *session_id)
+{
+    if (!sd_mounted || !session_id || validate_session_id(session_id) != 0) {
+        return -EINVAL;
+    }
+    if (strcmp(current_session_id, session_id) == 0) {
+        current_session_id[0] = '\0';
+    }
+    return storage_delete_session(session_id);
 }
 
 int storage_format_card(void)

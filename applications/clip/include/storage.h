@@ -354,6 +354,14 @@ int storage_list_chunks(const char *session_id, uint32_t *chunks, int max_chunks
  */
 int storage_delete_session(const char *session_id);
 
+/* Remove a session created at recording START whose first file create
+ * failed (no json-only phantom). Safe for the current session. */
+int storage_abort_session(const char *session_id);
+
+/* Boot-time GC: delete sessions with zero audio files. Returns the
+ * number removed. */
+int storage_sweep_empty_sessions(void);
+
 /**
  * @brief Format SD card
  *

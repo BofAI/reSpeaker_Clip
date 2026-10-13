@@ -104,6 +104,11 @@ static uint32_t recording_frame_count = 0;
 /* Storage integration */
 static struct storage_file current_storage_file = {0};
 static uint32_t current_file_index = 1;
+/* Files actually created this session (incremented only on a successful
+ * storage_create_file). Passed to storage_close_session — the old code
+ * passed current_file_index, which is 1 even when the first file failed,
+ * so stop wrote files:1 into session.json with ZERO files on disk. */
+static uint32_t files_created;
 static uint32_t file_start_frame_count = 0;
 
 /* False for RTC sessions: the pipeline runs but nothing is written to the
@@ -540,6 +545,7 @@ static int audio_start_recording_internal(enum audio_mode mode)
 
     /* Reset file index */
     current_file_index = 1;
+    files_created = 0;
     file_start_frame_count = 0;
 
     /* Boost CPU to 128MHz for encoding, before mic power-on.
@@ -610,10 +616,20 @@ static int audio_start_recording_internal(enum audio_mode mode)
         ret = storage_create_file(&current_storage_file, current_session_id,
                                   current_file_index);
         if (ret != 0) {
-            LOG_WRN("Failed to create storage file: %d", ret);
-        } else {
-            LOG_DBG("Recording to: %s", current_storage_file.filename);
+            /* Hard-fail the start: continuing meant recording_active with
+             * no open file (every frame silently dropped) and a stop that
+             * wrote files:1 into session.json with ZERO files on disk —
+             * a json-only phantom the scan trusts forever. Tear the
+             * just-created session down and surface Rec Fail. */
+            LOG_ERR("first file create %d — aborting session", ret);
+            storage_abort_session(current_session_id);
+            current_session_id[0] = '\0';
+            mic_power_off();
+            clip_cpu_boost_release();
+            return ret;
         }
+        files_created++;
+        LOG_DBG("Recording to: %s", current_storage_file.filename);
     } else {
         /* RTC: no on-card session/file */
         memset(&current_storage_file, 0, sizeof(current_storage_file));
@@ -666,7 +682,7 @@ static int audio_stop_recording_internal(void)
     /* Close storage session */
     if (session_persists) {
         duration_sec = stats.recording_time_ms / 1000;
-        ret = storage_close_session(current_session_id, duration_sec, current_file_index);
+        ret = storage_close_session(current_session_id, duration_sec, files_created);
         if (ret != 0) {
             LOG_WRN("Failed to close storage session: %d", ret);
         }
@@ -760,6 +776,7 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
                     current_file_index--;
                     break;
                 }
+                files_created++;
 
                 file_start_frame_count = recording_frame_count;
 
@@ -987,6 +1004,7 @@ create_new_segment:
                         current_file_index--;
                         /* Continue recording without storage */
                     } else {
+                        files_created++;
                         file_start_frame_count = recording_frame_count;
                     }
                 }
