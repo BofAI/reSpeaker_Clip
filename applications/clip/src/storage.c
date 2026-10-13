@@ -433,6 +433,7 @@ int storage_init(void)
      * feature / flag lost: seed it once with a verification walk. */
     k_work_init_delayable(&unsynced_save_work_d, unsynced_save_work_handler);
     settings_load_subtree("storage");
+    LOG_WRN("unsynced flag: loaded=%d cached=%d", unsynced_loaded, unsynced_cached);
     if (!unsynced_loaded) {
         (void)storage_has_unsynced_sessions(); /* scans + persists */
     }
@@ -1603,6 +1604,7 @@ bool storage_has_unsynced_sessions(void)
 	k_mutex_lock(&session_scan_mutex, K_FOREVER);
 	res = scan_unsynced_newest();
 	k_mutex_unlock(&session_scan_mutex);
+	LOG_WRN("unsynced scan: %d (flag was %d)", res, unsynced_cached);
 	storage_set_unsynced(res);
 	return res;
 }
@@ -1633,7 +1635,11 @@ static bool session_json_unsynced(const char *session_dir)
     if (fs_open(&file, path, FS_O_READ) != 0) {
         return false;
     }
-    n = fs_read(&file, buf, sizeof(buf) - 1);
+    /* sizeof(scan_json_buf), NOT sizeof(buf): buf is a pointer here —
+     * sizeof(buf) read 3 bytes, every json parse came up empty and the
+     * scan answered 'all synced' for every session (indicator off after
+     * reboot with unsynced audio). */
+    n = fs_read(&file, buf, sizeof(scan_json_buf) - 1);
     fs_close(&file);
     if (n <= 0) {
         return false;
