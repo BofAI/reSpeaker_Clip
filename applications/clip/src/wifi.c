@@ -164,7 +164,7 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
 				 "%02x:%02x:%02x:%02x:%02x:%02x",
 				 sta_info->mac[0], sta_info->mac[1], sta_info->mac[2],
 				 sta_info->mac[3], sta_info->mac[4], sta_info->mac[5]);
-		LOG_INF("STA+: %s", mac_string_buf);
+		LOG_DBG("STA+: %s", mac_string_buf);
 		sta_connected = true;
 		cancel_wifi_timeout();
 		transport_udp_update_active(false); /* Reset, waiting for new client */
@@ -178,7 +178,7 @@ static void wifi_mgmt_event_handler(struct net_mgmt_event_callback *cb,
 				 "%02x:%02x:%02x:%02x:%02x:%02x",
 				 sta_info->mac[0], sta_info->mac[1], sta_info->mac[2],
 				 sta_info->mac[3], sta_info->mac[4], sta_info->mac[5]);
-		LOG_INF("STA-: %s", mac_string_buf);
+		LOG_DBG("STA-: %s", mac_string_buf);
 		sta_connected = false;
 		schedule_wifi_timeout();
 		transport_udp_update_active(false); /* Notify transport of disconnect */

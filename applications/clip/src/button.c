@@ -114,12 +114,12 @@ static void button_event_callback(const struct device *dev, enum button_action a
     case BUTTON_LONG_PRESS_LEVEL_1:
     case BUTTON_LONG_PRESS_LEVEL_2:
     case BUTTON_LONG_PRESS_LEVEL_3:
-	LOG_DBG("LONG_PRESS_LVL (pwr off) act=%d st=%d", action, state);
+	LOG_WRN("LONG_PRESS_LVL (pwr off) act=%d st=%d", action, state);
 	/* Gate on VBUS presence, not battery_charging: a FULL pack on USB
 	 * reports charging=false, but the PMIC still refuses ship mode with
 	 * VBUS up — the shutdown would walk the whole failure path. */
 	if (battery_vbus_present()) {
-		LOG_DBG("USB power present, ignore power off");
+		LOG_WRN("USB power present, ignore power off");
 		break;
 	}
 	clip_post_event(CLIP_EVENT_POWER_OFF_SHOW);
