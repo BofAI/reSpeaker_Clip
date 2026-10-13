@@ -23,7 +23,6 @@ LOG_MODULE_REGISTER(config, LOG_LEVEL_WRN); /* flash budget: INF kept for batter
 /* Settings keys */
 #define SETTING_MODE            "config/mode"
 #define SETTING_NOISE_SUPPRESS  "config/noise_suppress"
-#define SETTING_AUTODEL         "config/auto_delete_days"
 #define SETTING_DEREVERB        "config/dereverb_enabled"
 #define SETTING_BRIGHTNESS      "config/oled_brightness"
 #define SETTING_WIFI_PASSWORD   "config/wifi_password"
@@ -50,7 +49,6 @@ struct config_entry {
 static const struct config_entry config_table[] = {
     { SETTING_MODE,           offsetof(struct clip_config, mode),           sizeof(uint8_t) },
     { SETTING_NOISE_SUPPRESS, offsetof(struct clip_config, noise_suppress), sizeof(uint8_t) },
-    { SETTING_AUTODEL,        offsetof(struct clip_config, auto_delete_days), sizeof(int8_t) },
     { SETTING_DEREVERB,       offsetof(struct clip_config, dereverb_enabled), sizeof(bool) },
     { SETTING_BRIGHTNESS,       offsetof(struct clip_config, oled_brightness),  sizeof(uint8_t) },
     { SETTING_WIFI_PASSWORD,    offsetof(struct clip_config, wifi_password),    sizeof(char[9]) },
@@ -157,7 +155,6 @@ static void config_set_defaults(struct clip_context *ctx)
 {
     ctx->config.mode = MODE_NORMAL;
     ctx->config.noise_suppress = CONFIG_CLIP_DEFAULT_NOISE;
-    ctx->config.auto_delete_days = CONFIG_CLIP_DEFAULT_AUTODEL;
     ctx->config.dereverb_enabled = IS_ENABLED(CONFIG_CLIP_DEFAULT_DEREVERB);
     ctx->config.oled_brightness = CONFIG_CLIP_DEFAULT_BRIGHTNESS;
     ctx->config.wifi_password[0] = '\0';
@@ -307,7 +304,6 @@ static const char *key_to_setting(uint16_t key)
     switch (key) {
     case CONFIG_KEY_MODE:       return SETTING_MODE;
     case CONFIG_KEY_NOISE:      return SETTING_NOISE_SUPPRESS;
-    case CONFIG_KEY_AUTODEL:    return SETTING_AUTODEL;
     case CONFIG_KEY_DEREVERB:   return SETTING_DEREVERB;
     case CONFIG_KEY_BRIGHTNESS: return SETTING_BRIGHTNESS;
     case CONFIG_KEY_WIFI_PASSWORD: return SETTING_WIFI_PASSWORD;
@@ -335,13 +331,6 @@ int config_set(uint16_t key, const void *value, size_t len)
     case CONFIG_KEY_NOISE:
         if (len == sizeof(uint8_t)) {
             ctx->config.noise_suppress = *(const uint8_t *)value;
-        } else {
-            ret = -EINVAL;
-        }
-        break;
-    case CONFIG_KEY_AUTODEL:
-        if (len == sizeof(int8_t)) {
-            ctx->config.auto_delete_days = *(const int8_t *)value;
         } else {
             ret = -EINVAL;
         }
@@ -422,12 +411,6 @@ int config_get(uint16_t key, void *value, size_t len)
     case CONFIG_KEY_NOISE:
         if (len == sizeof(uint8_t)) {
             *(uint8_t *)value = ctx->config.noise_suppress;
-            return 0;
-        }
-        break;
-    case CONFIG_KEY_AUTODEL:
-        if (len == sizeof(int8_t)) {
-            *(int8_t *)value = ctx->config.auto_delete_days;
             return 0;
         }
         break;
@@ -598,10 +581,6 @@ int config_set_noise_suppress(uint8_t noise)
     return config_set(CONFIG_KEY_NOISE, &noise, sizeof(noise));
 }
 
-int config_set_auto_delete_days(int8_t days)
-{
-    return config_set(CONFIG_KEY_AUTODEL, &days, sizeof(days));
-}
 
 int config_set_dereverb_enabled(bool enabled)
 {

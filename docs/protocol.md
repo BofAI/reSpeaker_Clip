@@ -248,7 +248,6 @@ Format: `AT+XX=<value>`
 
 Set configuration or execute with parameters:
 - `AT+MODE=<normal|enhanced>` - Set recording mode (`AT+START=<mode>` additionally accepts the legacy alias `merge`)
-- `AT+AUTODEL=<off|0|1-30>` - Set auto-delete policy
 - `AT+BRIGHTNESS=<0-255>` - Set OLED brightness
 - `AT+TIME=<unix_ts>` - Set system time
 - `AT+PAIR=<reset>` - Reset BLE pairing
@@ -270,7 +269,6 @@ Query current configuration:
 - `AT+DEVICE?` - Get device name
 - `AT+NAME?` - Get user-defined device name
 - `AT+MODE?` - Get current mode
-- `AT+AUTODEL?` - Get auto-delete policy
 - `AT+BRIGHTNESS?` - Get OLED brightness
 - `AT+TIME?` - Get current time
 - `AT+PAIR?` - Get pairing status
@@ -1063,39 +1061,8 @@ AT+CANCEL
 
 #### 3.3.6 Storage Management
 
-##### AT+AUTODEL - Auto-Delete Policy
-
-Configure automatic deletion policy for transferred sessions.
-
-**Request (Set):**
-```
-AT+AUTODEL=7
-```
-
-**Request (Get):**
-```
-AT+AUTODEL?
-```
-
-**Response (Set/Get):**
-```json
-{
-  "ok": true,
-  "data": { "autodel": 7 }
-}
-```
-
-> `autodel` is an integer (days) or the string `"off"`. Set echoes the applied value.
-
-**Policy Values:**
-| Value | Description |
-|-------|-------------|
-| `off` | Manual delete only (default) |
-| `0` | Delete immediately after transfer |
-| `1-30` | Delete N days after transfer |
-
-**Error Cases:**
-- `{"ok":false,"msg":"Auto-delete must be 0-30 days or off"}` / `"Missing autodel value"`
+> Removed: `AT+AUTODEL` never had a device-side implementation (the
+> policy was stored, never enforced) and has been deleted entirely.
 
 ---
 
@@ -2387,7 +2354,6 @@ These message strings appear across commands (exact text from the handlers):
 | `No active transfer` | `AT+CANCEL` with nothing transferring |
 | `Mode must be normal or enhanced` | Bad `AT+MODE` value |
 | `Brightness must be 0-255` | `AT+BRIGHTNESS` out of range |
-| `Auto-delete must be 0-30 days or off` | Bad `AT+AUTODEL` value |
 | `Log mode must be off, info or debug` | Bad `AT+LOG` value |
 | `Cannot format while recording` | `AT+FORMAT` while recording |
 | `Recording in progress, stop first` | `AT+USB`/`AT+WIFI` blocked by active recording |
@@ -2542,7 +2508,6 @@ To prevent BLE congestion:
 | AT+PAUSE | EXEC | Pause recording | 3.3.5 |
 | AT+RESUME | EXEC | Resume recording | 3.3.5 |
 | AT+CANCEL | EXEC | Cancel transfer | 3.3.5 |
-| AT+AUTODEL | GET/SET | Auto-delete policy | 3.3.6 |
 | AT+FORMAT | EXEC | Format SD card | 3.3.7 |
 | AT+POWEROFF | EXEC | Power off device | 3.3.7 |
 | AT+WIFI | EXEC/GET/SET | WiFi AP control | 3.3.7 |

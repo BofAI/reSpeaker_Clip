@@ -219,7 +219,6 @@ MTU 越大 = 通知越少 = 吞吐越高。
 
 设置配置或带参执行：
 - `AT+MODE=<normal|enhanced>` - 设置录音模式（`AT+START=<mode>` 另接受旧别名 `merge`）
-- `AT+AUTODEL=<off|0|1-30>` - 设置自动删除策略
 - `AT+BRIGHTNESS=<0-255>` - 设置 OLED 亮度
 - `AT+TIME=<unix_ts>` - 设置系统时间
 - `AT+PAIR=<reset>` - 重置 BLE 配对
@@ -241,7 +240,6 @@ MTU 越大 = 通知越少 = 吞吐越高。
 - `AT+DEVICE?` - 获取设备名
 - `AT+NAME?` - 获取用户自定义设备名
 - `AT+MODE?` - 获取当前模式
-- `AT+AUTODEL?` - 获取自动删除策略
 - `AT+BRIGHTNESS?` - 获取 OLED 亮度
 - `AT+TIME?` - 获取当前时间
 - `AT+PAIR?` - 获取配对状态
@@ -995,39 +993,7 @@ AT+CANCEL
 
 #### 3.3.6 存储管理
 
-##### AT+AUTODEL - 自动删除策略
-
-配置已传输会话的自动删除策略。
-
-**请求（设置）：**
-```
-AT+AUTODEL=7
-```
-
-**请求（查询）：**
-```
-AT+AUTODEL?
-```
-
-**响应（设置/查询）：**
-```json
-{
-  "ok": true,
-  "data": { "autodel": 7 }
-}
-```
-
-> `autodel` 为整数（天）或字符串 `"off"`。设置回显应用后的值。
-
-**策略取值：**
-| 值 | 说明 |
-|-------|-------------|
-| `off` | 仅手动删除（默认） |
-| `0` | 传输后立即删除 |
-| `1-30` | 传输后 N 天删除 |
-
-**错误情况：**
-- `{"ok":false,"msg":"Auto-delete must be 0-30 days or off"}` / `"Missing autodel value"`
+> 已移除：`AT+AUTODEL` 从未有过设备端实现（策略只存储、从未执行），现已整体删除。
 
 ---
 
@@ -2092,7 +2058,6 @@ RTC 模式经 BLE 实时流式传输麦克风音频，不在 SD 卡写任何内�
 | `No active transfer` | 无传输时 `AT+CANCEL` |
 | `Mode must be normal or enhanced` | `AT+MODE` 值非法 |
 | `Brightness must be 0-255` | `AT+BRIGHTNESS` 超范围 |
-| `Auto-delete must be 0-30 days or off` | `AT+AUTODEL` 值非法 |
 | `Log mode must be off, info or debug` | `AT+LOG` 值非法 |
 | `Cannot format while recording` | 录音中 `AT+FORMAT` |
 | `Recording in progress, stop first` | 录音活动阻塞 `AT+USB`/`AT+WIFI` |
@@ -2239,7 +2204,6 @@ RTC 模式经 BLE 实时流式传输麦克风音频，不在 SD 卡写任何内�
 | AT+PAUSE | EXEC | 暂停录音 | 3.3.5 |
 | AT+RESUME | EXEC | 恢复录音 | 3.3.5 |
 | AT+CANCEL | EXEC | 取消传输 | 3.3.5 |
-| AT+AUTODEL | GET/SET | 自动删除策略 | 3.3.6 |
 | AT+FORMAT | EXEC | 格式化 SD 卡 | 3.3.7 |
 | AT+POWEROFF | EXEC | 关机 | 3.3.7 |
 | AT+WIFI | EXEC/GET/SET | WiFi AP 控制 | 3.3.7 |

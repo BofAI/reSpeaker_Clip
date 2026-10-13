@@ -543,59 +543,6 @@ bool clip_log_fs_active(void)
     return log_fs_active;
 }
 
-/* AUTODEL Command Handler - Get/Set auto-delete policy */
-static int cmd_autodel_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
-{
-    struct clip_context *c = clip_get_context();
-
-    if (ctx->type == AT_CMD_TYPE_SET) {
-        /* Set autodel: AT+AUTODEL=<days> or AT+AUTODEL=off */
-        if (!ctx->args || strlen(ctx->args) == 0) {
-            return create_json_response(false, "Missing autodel value", NULL, response, len);
-        }
-
-        char autodel_str[32];
-        strncpy(autodel_str, ctx->args, sizeof(autodel_str) - 1);
-        autodel_str[sizeof(autodel_str) - 1] = '\0';
-        for (char *p = autodel_str; *p; p++) {
-            if (*p >= 'A' && *p <= 'Z') {
-                *p = *p - 'A' + 'a';
-            }
-        }
-
-        if (strcmp(autodel_str, "off") == 0 || strcmp(autodel_str, "-1") == 0) {
-            c->config.auto_delete_days = -1;
-            config_set_auto_delete_days(-1);
-            return create_json_response(true, NULL, "{\"autodel\":\"off\"}", response, len);
-        } else {
-            int days;
-            if (extract_int(ctx->args, &days) != 0) {
-                return create_json_response(false, "Invalid autodel value", NULL, response, len);
-            }
-
-            if (days < 0 || days > 30) {
-                return create_json_response(false, "Auto-delete must be 0-30 days or off", NULL, response, len);
-            }
-
-            c->config.auto_delete_days = days;
-            config_set_auto_delete_days(days);
-
-            char data[32];
-            snprintf(data, sizeof(data), "{\"autodel\":%d}", days);
-            return create_json_response(true, NULL, data, response, len);
-        }
-    } else {
-        /* Get autodel: AT+AUTODEL? */
-        char data[32];
-        if (c->config.auto_delete_days < 0) {
-            snprintf(data, sizeof(data), "{\"autodel\":\"off\"}");
-        } else {
-            snprintf(data, sizeof(data), "{\"autodel\":%d}", c->config.auto_delete_days);
-        }
-        return create_json_response(true, NULL, data, response, len);
-    }
-}
-
 /* BRIGHTNESS Command Handler - Get/Set OLED brightness */
 static int cmd_brightness_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
@@ -1982,14 +1929,6 @@ int at_commands_register(void)
     if (err) return err;
 
 
-    /* AUTODEL - Get/Set auto-delete policy */
-    static const struct at_command autodel_cmd = {
-        .name = "AUTODEL",
-        .flags = AT_CMD_SET | AT_CMD_QUERY | AT_CMD_EXEC,
-        .handler = cmd_autodel_handler,
-    };
-    err = at_server_register_cmd(&autodel_cmd);
-    if (err) return err;
 
     /* BRIGHTNESS - Get/Set OLED brightness */
     static const struct at_command brightness_cmd = {

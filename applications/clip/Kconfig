@@ -83,10 +83,6 @@ config CLIP_LOG_FS_DEFAULT_ON
 	  the production snippet) avoids broadcasting an app-only Kconfig symbol
 	  into the mcuboot sysbuild image, where it is undefined.
 
-config CLIP_DEFAULT_AUTODEL
-	int "Default auto-delete days (-1 for off)"
-	default -1
-
 config CLIP_DEFAULT_BRIGHTNESS
 	int "Default OLED brightness (0-255)"
 	default 32

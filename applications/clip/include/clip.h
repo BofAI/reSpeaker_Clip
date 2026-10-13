@@ -69,7 +69,6 @@ struct clip_context {
     struct clip_config {
         uint8_t mode;               /* Recording mode (normal/enhanced) */
         uint8_t noise_suppress;     /* Noise suppression level (dB) */
-        int8_t auto_delete_days;    /* Auto-delete policy: -1=off, 0-30=days */
         bool dereverb_enabled;      /* Dereverberation enabled */
         uint8_t oled_brightness;    /* OLED brightness (0-255) */
         char wifi_password[9];      /* WiFi AP password (8 chars + NUL) */

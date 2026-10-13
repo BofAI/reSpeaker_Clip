@@ -217,7 +217,7 @@ All commands return JSON responses. Key commands:
 - `AT+DOWNLOAD=<session_id>` - Start file transfer
 - `AT+CANCEL` - Cancel transfer (thread-safe via volatile flag)
 - `AT+DELETE=<session_id>` - Session management
-- `AT+MODE`, `AT+NOISE`, `AT+DEREVERB`, `AT+AUTODEL`, `AT+BRIGHTNESS` - Configuration
+- `AT+MODE`, `AT+BRIGHTNESS` - Configuration (`AT+AUTODEL` removed — the policy was stored but never enforced; noise/dereverb fold into MODE)
 - `AT+WIFI=on|off` - WiFi AP control
 - `AT+LOG=off|info|debug` - SD log backend level (debug default: info); off lets the SD card idle power-gate
 - `AT+TIME=<timestamp>` - Time sync

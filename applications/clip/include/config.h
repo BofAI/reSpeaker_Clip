@@ -14,7 +14,6 @@
 /* Configuration keys */
 #define CONFIG_KEY_MODE          0x03
 #define CONFIG_KEY_NOISE         0x04
-#define CONFIG_KEY_AUTODEL       0x06
 #define CONFIG_KEY_DEREVERB      0x09
 #define CONFIG_KEY_BRIGHTNESS    0x0A
 #define CONFIG_KEY_WIFI_PASSWORD 0x0B
@@ -132,7 +131,6 @@ int config_set_noise_suppress(uint8_t noise);
  * @param days Days (0-30) or -1 for off
  * @return 0 on success, negative error code on failure
  */
-int config_set_auto_delete_days(int8_t days);
 
 /**
  * @brief Set dereverb enabled
