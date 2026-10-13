@@ -19,6 +19,7 @@
 #include <stdarg.h>
 
 #include "storage.h"
+#include "transfer.h"
 
 LOG_MODULE_REGISTER(storage, CONFIG_CLIP_LOG_LEVEL);
 
@@ -889,7 +890,7 @@ int storage_write_frame(struct storage_file *file, const uint8_t *data, uint32_t
      * STORAGE_PERIODIC_SYNC_MS). Audio thread context: fs_sync on SPI
      * SD is a few ms every 15 s — acceptable next to the 4 KiB flushes
      * that already run here. */
-    if (current_file_ptr &&
+    if (current_file_ptr && !transfer_is_active() &&
         k_uptime_get() - last_periodic_sync_ms >= STORAGE_PERIODIC_SYNC_MS) {
         if (buffer_pos > 0) {
             (void)flush_write_buffer();
