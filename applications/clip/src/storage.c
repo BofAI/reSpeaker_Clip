@@ -98,7 +98,8 @@ static int create_session_json(const char *path, const char *session_id,
 static int update_session_json(const char *session_id, uint32_t duration_sec,
                                uint32_t chunk_count, uint64_t session_bytes);
 static int flush_write_buffer(void);
-static void delete_dir_contents(const char *dir_path);
+static bool delete_dir_contents(const char *dir_path);
+static void prune_empty_parents(const char *session_id);
 static int validate_session_id(const char *session_id);
 static int scan_session_ids(char ids[][16], int max_ids, int *total);
 
@@ -1574,15 +1575,39 @@ int storage_delete_session(const char *session_id)
         return rc;
     }
 
-    /* Recursively delete all contents (files and group subdirectories) */
-    delete_dir_contents(dir_path);
+    {
+        /* Missing sessions used to "delete" successfully (contents
+         * no-op, dir unlink failed silently, ok returned regardless) —
+         * hosts could not trust the result and the AT layer's
+         * "Session not found" branch was dead code. */
+        struct fs_dirent entry;
+
+        if (fs_stat(dir_path, &entry) != 0 ||
+            entry.type != FS_DIR_ENTRY_DIR) {
+            LOG_WRN("delete: session %s not found", session_id);
+            return -ENOENT;
+        }
+    }
+
+    /* Recursively delete all contents (files and group subdirectories).
+     * Partial failures are no longer swallowed: a leftover file keeps
+     * the directory non-empty, its unlink then fails too, and the
+     * caller gets -EIO instead of a false success. */
+    bool clean = delete_dir_contents(dir_path);
 
     /* Remove session directory */
     rc = fs_unlink(dir_path);
-    if (rc != 0)
+    if (!clean || rc != 0)
     {
-        LOG_WRN("Failed to remove session directory: %d", rc);
+        LOG_ERR("delete %s incomplete (contents %d, dir %d)",
+                session_id, !clean, rc);
+        return -EIO;
     }
+
+    /* Prune the now-empty minute/hour/day parents so a synced-and-deleted
+     * session leaves no empty folder tree behind (unlink on a non-empty
+     * dir fails — that IS the emptiness test). */
+    prune_empty_parents(session_id);
 
     return 0;
 }
@@ -1641,14 +1666,15 @@ int storage_format_card(void)
 
 /* Internal functions */
 
-static void delete_dir_contents(const char *dir_path)
+static bool delete_dir_contents(const char *dir_path)
 {
     struct fs_dir_t dirp;
     struct fs_dirent entry;
+    bool ok = true;
 
     fs_dir_t_init(&dirp);
     if (fs_opendir(&dirp, dir_path) != 0) {
-        return;
+        return false;
     }
 
     while (fs_readdir(&dirp, &entry) == 0 && entry.name[0] != '\0') {
@@ -1656,18 +1682,54 @@ static void delete_dir_contents(const char *dir_path)
 
         if (storage_path_format(filepath, sizeof(filepath), "%s/%s", dir_path,
                                 entry.name) != 0) {
+            ok = false;
             continue;
         }
 
         if (entry.type == FS_DIR_ENTRY_DIR && entry.name[0] != '.') {
-            delete_dir_contents(filepath);
-            fs_unlink(filepath);
-        } else {
-            fs_unlink(filepath);
+            ok &= delete_dir_contents(filepath);
+            if (fs_unlink(filepath) != 0) {
+                ok = false;
+            }
+        } else if (fs_unlink(filepath) != 0) {
+            ok = false;
         }
     }
 
     fs_closedir(&dirp);
+    return ok;
+}
+
+/* Remove the empty YYYYMMDD/HH/MM chain above a deleted session. FAT
+ * unlink only succeeds on an empty directory, so the first failure means
+ * another session still lives there — stop climbing. STORAGE_BASE_PATH
+ * itself is never removed. */
+static void prune_empty_parents(const char *session_id)
+{
+    char day[STORAGE_PATH_MAX];
+    char hour[STORAGE_PATH_MAX];
+    char minute[STORAGE_PATH_MAX];
+
+    if (storage_path_format(day, sizeof(day), "%s/%.8s", STORAGE_BASE_PATH,
+                            session_id) != 0) {
+        return;
+    }
+    if (storage_path_format(hour, sizeof(hour), "%s/%.2s", day,
+                            session_id + 8) != 0) {
+        return;
+    }
+    if (storage_path_format(minute, sizeof(minute), "%s/%.2s", hour,
+                            session_id + 10) != 0) {
+        return;
+    }
+
+    if (fs_unlink(minute) != 0) {
+        return;
+    }
+    if (fs_unlink(hour) != 0) {
+        return;
+    }
+    (void)fs_unlink(day);
 }
 
 static int update_free_space(void)
