@@ -707,7 +707,7 @@ static void read_and_update_locked(void)
 		last_percent = display_percent;
 		bt_bas_set_battery_level(display_percent);
 		ctx->status.battery_percent = display_percent;
-		LOG_INF("Battery: %u%% (actual %u%%, %u mV)",
+		LOG_DBG("Battery: %u%% (actual %u%%, %u mV)",
 			display_percent, percent, (uint32_t)(voltage * 1000));
 
 		/* Low battery warning and auto-shutdown use displayed percentage */

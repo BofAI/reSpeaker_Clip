@@ -224,10 +224,6 @@ static bool rtc_params_active;
 static void le_param_updated(struct bt_conn *conn, uint16_t interval,
                              uint16_t latency, uint16_t timeout)
 {
-    /* TEMP DIAG (WRN so it survives the WRN build): negotiated params */
-    LOG_WRN("DIAG conn params: interval=%u (%u.%02u ms) latency=%u timeout=%u",
-            interval, (interval * 5) / 4, ((interval * 5) % 4) * 25, latency,
-            timeout);
 
     conn_interval_units = interval;
 
@@ -255,10 +251,9 @@ void ble_request_rtc_conn_params(bool rtc)
     int err = bt_conn_le_param_update(ble_ctx.conn,
                                       rtc ? &conn_params_rtc : &conn_params_default);
     if (err && err != -EALREADY) {
-        LOG_WRN("DIAG conn param update (%s) failed: %d", rtc ? "rtc" : "default", err);
+        LOG_WRN("conn param update (%s) failed: %d", rtc ? "rtc" : "default", err);
     } else {
         rtc_params_active = rtc;
-        LOG_WRN("DIAG conn param update requested: %s (err=%d)", rtc ? "rtc" : "default", err);
     }
 }
 

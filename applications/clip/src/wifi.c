@@ -410,7 +410,7 @@ int wifi_on(void)
 	/* Start auto-off timeout */
 	schedule_wifi_timeout();
 
-	LOG_INF("AP up: %s ch=%d %s:%d",
+	LOG_DBG("AP up: %s ch=%d %s:%d",
 			ap_ssid, WIFI_AP_CHANNEL, CONFIG_NET_CONFIG_MY_IPV4_ADDR, WIFI_AP_UDP_PORT);
 
 	ble_notify_event("wifi", "on");

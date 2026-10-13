@@ -11,6 +11,7 @@
 #include <zephyr/drivers/regulator.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/pm/device.h>
+#include <zephyr/settings/settings.h>
 #include <ff.h>
 #include <zephyr/logging/log.h>
 #include <string.h>
@@ -90,6 +91,50 @@ static K_SEM_DEFINE(file_closed_sem, 0, 1);
 /* Mutex to serialize session.json read-modify-write across threads */
 static K_MUTEX_DEFINE(session_json_mutex);
 
+/* Persisted "untransferred audio exists" flag - the indicator's fast
+ * path. Recording start sets it; a bounded newest-first verification walk
+ * (only while it is true, e.g. after a transfer completes) clears it.
+ * Boot reads the flag instead of scanning the card. Worst-case drift is
+ * conservative (flag stays true until the next verification). */
+#define UNSYNCED_KEY "storage/unsynced"
+static bool unsynced_cached;
+static bool unsynced_loaded;
+
+static int unsynced_settings_set(const char *key, size_t len,
+                                 settings_read_cb read_cb, void *cb_arg)
+{
+    uint8_t val;
+
+    ARG_UNUSED(key);
+    if (len != sizeof(val)) {
+        return -EINVAL;
+    }
+    if (read_cb(cb_arg, &val, sizeof(val)) != sizeof(val)) {
+        return -EIO;
+    }
+    unsynced_cached = val != 0;
+    unsynced_loaded = true;
+    return 0;
+}
+SETTINGS_STATIC_HANDLER_DEFINE(unsynced, UNSYNCED_KEY, NULL,
+                               unsynced_settings_set, NULL, NULL);
+
+static void storage_set_unsynced(bool v)
+{
+    uint8_t val = v ? 1U : 0U;
+    int rc;
+
+    if (unsynced_loaded && unsynced_cached == v) {
+        return; /* unchanged - skip the LittleFS write */
+    }
+    unsynced_cached = v;
+    unsynced_loaded = true;
+    rc = settings_save_one(UNSYNCED_KEY, &val, sizeof(val));
+    if (rc != 0) {
+        LOG_WRN("unsynced flag save %d", rc);
+    }
+}
+
 /* Shared session-id window for has_unsynced/sweep — 1 KiB in .bss, NOT on
  * the caller's stack: storage_has_unsynced_sessions() runs on the TRANSFER
  * thread (transfer cleanup) whose 4 KiB stack overflowed with a local
@@ -111,6 +156,7 @@ static bool delete_dir_contents(const char *dir_path);
 static void prune_empty_parents(const char *session_id);
 static int validate_session_id(const char *session_id);
 static int scan_session_ids(char ids[][16], int max_ids, int *total);
+static bool scan_unsynced_newest(void);
 
 static int storage_path_format(char *path, size_t path_size, const char *fmt, ...)
 {
@@ -294,7 +340,7 @@ int storage_init(void)
         k_msleep(20);
     }
 
-    LOG_INF("SD init");
+    LOG_DBG("SD init");
 
     /* Card power-up race: the LDO2 ramp plus the card's internal init
      * can exceed the settle delay on some cards / temperatures. A boot
@@ -337,7 +383,15 @@ int storage_init(void)
 
     sd_mounted = true;
     sd_powered = true;
-    LOG_INF("SD card mounted at /SD:");
+    LOG_DBG("SD card mounted at /SD:");
+
+    /* Restore the persisted untransferred flag (the indicator's fast
+     * path - replaces the boot-time card scan). First boot after this
+     * feature / flag lost: seed it once with a verification walk. */
+    settings_load_subtree("storage");
+    if (!unsynced_loaded) {
+        (void)storage_has_unsynced_sessions(); /* scans + persists */
+    }
 
     /* Create base REC directory if not exists */
     rc = fs_stat(STORAGE_BASE_PATH, &entry);
@@ -445,7 +499,7 @@ int storage_remount(void)
     }
 
     sd_mounted = true;
-    LOG_INF("SD remounted");
+    LOG_DBG("SD remounted");
 
     update_free_space();
     return 0;
@@ -632,6 +686,10 @@ int storage_create_session(const char *session_id, uint8_t channels,
     strncpy(current_session_id, session_id, sizeof(current_session_id) - 1);
     current_session_id[sizeof(current_session_id) - 1] = '\0';
     session_bytes_base = total_bytes;
+
+    /* New audio exists -> the untransferred flag goes up immediately
+     * (persisted; cleared by the next verification walk). */
+    storage_set_unsynced(true);
 
     return 0;
 }
@@ -1491,40 +1549,131 @@ int storage_get_session_info(const char *session_id, struct storage_session_info
 
 bool storage_has_unsynced_sessions(void)
 {
-	int n;
-	bool unsynced = false;
+	bool res;
 
-	/* Truthful "untransferred" check: a session counts only when it has
-	 * audio the host has not fully ACKed (synced < files). The old "any
-	 * session.json counts" rule lit the indicator for sessions the app
-	 * had fully synced but kept on device by design. The id window is
-	 * the oldest 64 (sorted) — beyond that the answer is
-	 * conservative-true (the newest sessions are the likely-unsynced
-	 * ones and are exactly the ones dropped by the window). */
+	/* Fast path: persisted flag false -> no unsynced audio, no card
+	 * access at all. Flag true (or first boot, never stored) ->
+	 * bounded newest-first verification walk; the result is persisted
+	 * so the flag self-heals after the next sync/delete. The common
+	 * case (newest session unsynced) resolves in 1-2 session reads. */
+	if (unsynced_loaded && !unsynced_cached) {
+		return false;
+	}
 	k_mutex_lock(&session_scan_mutex, K_FOREVER);
-	n = storage_list_session_ids(session_scan_ids,
-				      ARRAY_SIZE(session_scan_ids));
-	if (n < 0) {
-		goto out;
-	}
-	if (n == (int)ARRAY_SIZE(session_scan_ids)) {
-		unsynced = true; /* window full — more sessions than sampled */
-		goto out;
-	}
-	for (int i = 0; i < n; i++) {
-		struct storage_session_info info;
-
-		if (storage_get_session_info(session_scan_ids[i], &info) != 0) {
-			continue;
-		}
-		if (info.synced_files < info.file_count) {
-			unsynced = true;
-			break;
-		}
-	}
-out:
+	res = scan_unsynced_newest();
 	k_mutex_unlock(&session_scan_mutex);
-	return unsynced;
+	storage_set_unsynced(res);
+	return res;
+}
+
+/* Read one session.json and answer whether the session holds unsynced
+ * audio (synced < files, or still recording). */
+static bool session_json_unsynced(const char *session_dir)
+{
+    char path[STORAGE_PATH_MAX];
+    struct fs_file_t file;
+    char buf[384];
+    uint32_t files = 0, synced = 0;
+    ssize_t n;
+
+    if (storage_path_format(path, sizeof(path), "%s/session.json",
+                            session_dir) != 0) {
+        return false;
+    }
+    fs_file_t_init(&file);
+    if (fs_open(&file, path, FS_O_READ) != 0) {
+        return false;
+    }
+    n = fs_read(&file, buf, sizeof(buf) - 1);
+    fs_close(&file);
+    if (n <= 0) {
+        return false;
+    }
+    buf[n] = 0;
+
+    char *p = strstr(buf, "\"files\":");
+    if (p) {
+        files = (uint32_t)atoi(p + 8);
+    }
+    p = strstr(buf, "\"synced\":");
+    if (p) {
+        synced = (uint32_t)atoi(p + 9);
+    }
+    p = strstr(buf, "\"recording\":");
+    if (p && strncmp(p + 12, "true", 4) == 0) {
+        return true; /* active recording always counts */
+    }
+    return synced < files;
+}
+
+/* Walk the YYYYMMDD/HH/MM/SS tree NEWEST-first, stop at the first
+ * unsynced session - the newest sessions are the likely-unsynced ones,
+ * so the common case resolves in 1-2 session reads. Bounded: newest 16
+ * entries per level, 512 session checks. */
+#define UNSYNCED_MAX_LEVEL  16
+#define UNSYNCED_MAX_CHECKS 512
+
+static bool scan_level_unsynced(const char *dir_path, int level, int *checks)
+{
+    char names[UNSYNCED_MAX_LEVEL][12];
+    size_t wl = (level == 0) ? 8 : 2;
+    struct fs_dir_t dp;
+    struct fs_dirent ent;
+    int cnt = 0;
+
+    fs_dir_t_init(&dp);
+    if (fs_opendir(&dp, dir_path) != 0) {
+        return false;
+    }
+    while (fs_readdir(&dp, &ent) == 0 && ent.name[0] != 0) {
+        if (ent.type == FS_DIR_ENTRY_DIR && ent.name[0] != '.' &&
+            strlen(ent.name) == wl && is_decimal_name(ent.name, wl) &&
+            cnt < UNSYNCED_MAX_LEVEL) {
+            strncpy(names[cnt], ent.name, sizeof(names[cnt]) - 1);
+            names[cnt][sizeof(names[cnt]) - 1] = 0;
+            cnt++;
+        }
+    }
+    fs_closedir(&dp);
+
+    /* insertion sort, descending (newest timestamp first) */
+    for (int i = 1; i < cnt; i++) {
+        char tmp[12];
+        int j;
+
+        strcpy(tmp, names[i]);
+        for (j = i - 1; j >= 0 && strcmp(names[j], tmp) < 0; j--) {
+            strcpy(names[j + 1], names[j]);
+        }
+        strcpy(names[j + 1], tmp);
+    }
+
+    for (int i = 0; i < cnt; i++) {
+        char child[STORAGE_PATH_MAX];
+
+        if (storage_path_format(child, sizeof(child), "%s/%s",
+                                dir_path, names[i]) != 0) {
+            continue;
+        }
+        if (level == 3) {
+            if (++(*checks) > UNSYNCED_MAX_CHECKS) {
+                return false; /* bound reached: assume synced */
+            }
+            if (session_json_unsynced(child)) {
+                return true;
+            }
+        } else if (scan_level_unsynced(child, level + 1, checks)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool scan_unsynced_newest(void)
+{
+    int checks = 0;
+
+    return scan_level_unsynced(STORAGE_BASE_PATH, 0, &checks);
 }
 
 int storage_sweep_empty_sessions(void)
@@ -1758,6 +1907,8 @@ int storage_format_card(void)
 
     /* 4. Recreate REC directory */
     fs_mkdir(STORAGE_BASE_PATH);
+
+    storage_set_unsynced(false);
 
     return 0;
 }
