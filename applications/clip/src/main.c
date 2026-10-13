@@ -235,7 +235,10 @@ int clip_init(void)
         LOG_WRN("Storage init failed: %d", err);
         /* Continue anyway - storage is optional */
     } else {
-        /* SD card mounted - check for unsynced sessions */
+        /* SD card mounted — sweep json-only/empty phantom sessions first
+         * (power-cut windows, aborted starts, host-side deletions), then
+         * check for unsynced sessions against the cleaned card. */
+        (void)storage_sweep_empty_sessions();
         display_check_untransferred();
 
 #ifdef CONFIG_LOG_BACKEND_FS

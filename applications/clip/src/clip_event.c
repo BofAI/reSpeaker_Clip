@@ -844,6 +844,11 @@ static enum clip_event_result execute_transition(enum clip_event event,
             }
             ble_notify_state_change("IDLE", audio_get_session_id(), dur);
         }
+
+        /* Re-read the untransferred indicator from the card now that the
+         * session finalized (a zero-file session was just removed by the
+         * close path — the flag must not stay stuck on it). */
+        display_check_untransferred();
         return CLIP_EVENT_OK;
     }
 
