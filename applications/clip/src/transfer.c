@@ -1163,11 +1163,13 @@ open_file:
         return ret;
     }
 
-    /* Skip empty files */
+    /* Skip empty files — do NOT unlink them: host-visible state must
+     * not be mutated from the transfer thread, and deleting a 0-byte
+     * .opus while session.json still claims files:N turns the session
+     * into a json-only phantom the scan trusts forever. */
     if (entry.size == 0) {
-        LOG_WRN("Empty file: %s", current_transfer.current_file);
+        LOG_WRN("Empty file skipped: %s", current_transfer.current_file);
         fs_close(&transfer_file);
-        fs_unlink(filepath);
         current_transfer.current_file[0] = '\0';
         return -ENOENT;
     }
