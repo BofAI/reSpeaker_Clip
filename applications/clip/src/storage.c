@@ -151,7 +151,7 @@ SETTINGS_STATIC_HANDLER_DEFINE(unsynced, UNSYNCED_KEY, NULL,
  * (indicator semantics unchanged); coalesced write follows. Drift window:
  * a power cut before the deferred write persists loses one flag update —
  * the next verification walk self-heals it (conservative direction). */
-static struct k_work unsynced_save_work;
+static struct k_work_delayable unsynced_save_work_d;
 
 static void unsynced_save_work_handler(struct k_work *w)
 {
@@ -171,7 +171,11 @@ static void storage_set_unsynced(bool v)
     }
     unsynced_cached = v;
     unsynced_loaded = true;
-    k_work_submit(&unsynced_save_work);
+    /* Delayed, not just deferred: the write shares the global fs mutex
+     * with the SD burst, so an immediate workqueue write still puts the
+     * audio thread behind it inside the recording-start window. 3 s
+     * clears the start burst (and the first 4 KiB flush). */
+    k_work_reschedule(&unsynced_save_work_d, K_SECONDS(3));
 }
 
 /* Shared session-id window for has_unsynced/sweep — 1 KiB in .bss, NOT on
@@ -427,7 +431,7 @@ int storage_init(void)
     /* Restore the persisted untransferred flag (the indicator's fast
      * path - replaces the boot-time card scan). First boot after this
      * feature / flag lost: seed it once with a verification walk. */
-    k_work_init(&unsynced_save_work, unsynced_save_work_handler);
+    k_work_init_delayable(&unsynced_save_work_d, unsynced_save_work_handler);
     settings_load_subtree("storage");
     if (!unsynced_loaded) {
         (void)storage_has_unsynced_sessions(); /* scans + persists */
