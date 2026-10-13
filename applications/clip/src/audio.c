@@ -804,14 +804,18 @@ void audio_recording_thread(void *p1, void *p2, void *p3)
              */
             ret = dmic_read(dmic_dev, 0, &buffer, &size, 200);
             if (ret < 0) {
-                LOG_WRN("dmic_read: err=%d consec=%d frames=%u",
+                LOG_DBG("dmic_read: err=%d consec=%d frames=%u",
                         ret, dmic_timeout_count + 1, stats.frames_encoded);
                 if (ret == -EAGAIN) {
                     /* Timeout - track consecutive timeouts for recovery */
                     dmic_timeout_count++;
 
                     if (dmic_timeout_count >= 2) {
-                        LOG_WRN("DMIC timeout, retrigger");
+                        /* Random SD flush spikes (>40 ms, card-internal GC/WL) stall the
+		 * audio thread past the 2-block DMIC queue — self-recovering,
+	 * baseline behavior (structural fix = dedicated writer thread).
+	 * DBG: known noise, not actionable on-device. */
+		LOG_DBG("DMIC timeout, retrigger");
                         LOG_WRN("DSP=%uus enc=%uus (frm=%u)",
                                 stats.frames_encoded > 0 ?
                                     (uint32_t)(dsp_time_total_us / stats.frames_encoded) : 0,
