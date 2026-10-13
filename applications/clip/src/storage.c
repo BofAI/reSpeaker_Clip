@@ -1566,13 +1566,21 @@ bool storage_has_unsynced_sessions(void)
 	return res;
 }
 
+#define UNSYNCED_MAX_LEVEL  16
+#define UNSYNCED_MAX_DEPTH  4    /* day / hour / minute / session */
+#define UNSYNCED_MAX_CHECKS 512
+
+static char scan_names[UNSYNCED_MAX_DEPTH][UNSYNCED_MAX_LEVEL][12];
+static char scan_child[UNSYNCED_MAX_DEPTH][STORAGE_PATH_MAX];
+static char scan_json_buf[384];
+
 /* Read one session.json and answer whether the session holds unsynced
  * audio (synced < files, or still recording). */
 static bool session_json_unsynced(const char *session_dir)
 {
     char path[STORAGE_PATH_MAX];
     struct fs_file_t file;
-    char buf[384];
+    char *buf = scan_json_buf;
     uint32_t files = 0, synced = 0;
     ssize_t n;
 
@@ -1609,13 +1617,15 @@ static bool session_json_unsynced(const char *session_dir)
 /* Walk the YYYYMMDD/HH/MM/SS tree NEWEST-first, stop at the first
  * unsynced session - the newest sessions are the likely-unsynced ones,
  * so the common case resolves in 1-2 session reads. Bounded: newest 16
- * entries per level, 512 session checks. */
-#define UNSYNCED_MAX_LEVEL  16
-#define UNSYNCED_MAX_CHECKS 512
-
+ * entries per level, 512 session checks.
+ *
+ * ALL buffers are static (.bss, guarded by session_scan_mutex): the
+ * recursion + json frame as stack locals overflowed first the transfer
+ * thread (4 KiB) and then the main thread at boot (6 KiB, silent death
+ * right after audio init). Per-level stack cost is now ~100 B. */
 static bool scan_level_unsynced(const char *dir_path, int level, int *checks)
 {
-    char names[UNSYNCED_MAX_LEVEL][12];
+    char (*names)[12] = scan_names[level];
     size_t wl = (level == 0) ? 8 : 2;
     struct fs_dir_t dp;
     struct fs_dirent ent;
@@ -1629,8 +1639,8 @@ static bool scan_level_unsynced(const char *dir_path, int level, int *checks)
         if (ent.type == FS_DIR_ENTRY_DIR && ent.name[0] != '.' &&
             strlen(ent.name) == wl && is_decimal_name(ent.name, wl) &&
             cnt < UNSYNCED_MAX_LEVEL) {
-            strncpy(names[cnt], ent.name, sizeof(names[cnt]) - 1);
-            names[cnt][sizeof(names[cnt]) - 1] = 0;
+            strncpy(names[cnt], ent.name, 11);
+            names[cnt][11] = 0;
             cnt++;
         }
     }
@@ -1649,9 +1659,9 @@ static bool scan_level_unsynced(const char *dir_path, int level, int *checks)
     }
 
     for (int i = 0; i < cnt; i++) {
-        char child[STORAGE_PATH_MAX];
+        char *child = scan_child[level];
 
-        if (storage_path_format(child, sizeof(child), "%s/%s",
+        if (storage_path_format(child, STORAGE_PATH_MAX, "%s/%s",
                                 dir_path, names[i]) != 0) {
             continue;
         }
