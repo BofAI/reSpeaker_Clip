@@ -9,4 +9,5 @@ bool https_poc_command_allowed(const char *name);
 bool https_poc_event(enum clip_event event, struct clip_event_result_info *result,
                      bool device_idle);
 int wifi_station_connect(const char *ssid, const char *password, atomic_t *cancel);
+const char *wifi_station_last_step(void);
 #endif

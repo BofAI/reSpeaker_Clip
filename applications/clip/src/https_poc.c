@@ -20,6 +20,9 @@
 #include "https_ca.h"
 
 #define CA_TAG 71
+BUILD_ASSERT(IS_ENABLED(CONFIG_PSA_WANT_ALG_ECDSA) &&
+             IS_ENABLED(CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED),
+             "The HTTPS experiment's EC test certificates require ECDHE-ECDSA support");
 #define MAX_FILE (8U * 1024U * 1024U)
 #define CONNECT_BUDGET_MS (CONFIG_NET_SOCKETS_CONNECT_TIMEOUT + \
                            CONFIG_NET_SOCKETS_TLS_CONNECT_TIMEOUT)
@@ -28,6 +31,12 @@ BUILD_ASSERT(CONFIG_NET_SOCKETS_CONNECT_TIMEOUT > 0 &&
              "HTTPS requires bounded TCP + TLS connection timeouts (at most 30 seconds)");
 static atomic_t active, cancelled, stage, last_error, bytes_sent;
 static atomic_t stalled;
+enum { TLS_SETUP_IDLE, TLS_SETUP_DNS, TLS_SETUP_SOCKET, TLS_SETUP_CERTIFICATE,
+       TLS_SETUP_VERIFY, TLS_SETUP_HOSTNAME, TLS_SETUP_SEND_TIMEOUT,
+       TLS_SETUP_RECEIVE_TIMEOUT, TLS_SETUP_HANDSHAKE, TLS_SETUP_HTTP };
+static atomic_t tls_step;
+static const char *const tls_steps[] = {"idle", "resolve", "socket", "certificate",
+    "peer_verify", "hostname", "send_timeout", "receive_timeout", "handshake", "http"};
 static K_MUTEX_DEFINE(socket_lock);
 static int running_socket = -1;
 static K_SEM_DEFINE(start_job, 0, 1);
@@ -269,10 +278,12 @@ static int upload(int sock)
 
 static int tls_connect(void)
 {
+    atomic_set(&tls_step, TLS_SETUP_DNS);
     struct zsock_addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
     struct zsock_addrinfo *address = NULL;
     int ret = zsock_getaddrinfo(host, port, &hints, &address);
     if (ret) { return -EHOSTUNREACH; }
+    atomic_set(&tls_step, TLS_SETUP_SOCKET);
     int sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TLS_1_2);
     if (sock < 0) { zsock_freeaddrinfo(address); return -errno; }
     k_mutex_lock(&socket_lock, K_FOREVER);
@@ -285,17 +296,22 @@ static int tls_connect(void)
 #define OPTION(level, name, value, size) do { \
     if (zsock_setsockopt(sock, level, name, value, size) < 0) { ret = -errno; goto out; } \
 } while (0)
+    atomic_set(&tls_step, TLS_SETUP_CERTIFICATE);
     OPTION(SOL_TLS, TLS_SEC_TAG_LIST, tags, sizeof(tags));
+    atomic_set(&tls_step, TLS_SETUP_VERIFY);
     OPTION(SOL_TLS, TLS_PEER_VERIFY, &verify, sizeof(verify));
+    atomic_set(&tls_step, TLS_SETUP_HOSTNAME);
     OPTION(SOL_TLS, TLS_HOSTNAME, host, strlen(host) + 1);
+    atomic_set(&tls_step, TLS_SETUP_SEND_TIMEOUT);
     OPTION(SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    atomic_set(&tls_step, TLS_SETUP_RECEIVE_TIMEOUT);
     OPTION(SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 #undef OPTION
     /* In this SDK, TLS connect performs blocking TCP connect and handshake.
      * Use the explicit Kconfig timeouts, not POLLOUT (TCP writability does
      * not prove the TLS handshake completed). Keep within the job deadline. */
     if (deadline - k_uptime_get() < CONNECT_BUDGET_MS) { ret = -ETIMEDOUT; goto out; }
-    atomic_set(&stage, TLS);
+    atomic_set(&tls_step, TLS_SETUP_HANDSHAKE);
     ret = zsock_connect(sock, address->ai_addr, address->ai_addrlen);
     if (ret < 0) { ret = -errno; }
     int cancel_ret = check_cancel();
@@ -311,6 +327,7 @@ static void worker(void *a, void *b, void *c)
     ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
     for (;;) {
         k_sem_take(&start_job, K_FOREVER);
+        atomic_set(&tls_step, TLS_SETUP_IDLE);
         deadline = k_uptime_get() + 300000;
         atomic_set(&stage, PREPARING);
         char path[STORAGE_PATH_MAX];
@@ -329,8 +346,11 @@ static void worker(void *a, void *b, void *c)
             atomic_set(&stage, CONNECTING);
             ret = wifi_station_connect(ssid, password, &cancelled);
         }
-        if (!ret) { sock = tls_connect(); if (sock < 0) { ret = sock; } }
-        if (!ret) { ret = upload(sock); }
+        if (!ret) {
+            atomic_set(&stage, TLS);
+            sock = tls_connect(); if (sock < 0) { ret = sock; }
+        }
+        if (!ret) { atomic_set(&tls_step, TLS_SETUP_HTTP); ret = upload(sock); }
         struct k_work_sync sync;
         k_work_cancel_delayable_sync(&stall_work, &sync);
         if (sock >= 0) { close_socket(sock); }
@@ -410,9 +430,10 @@ static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
 reply:
     memset(args, 0, sizeof(args));
     return snprintf(response, length,
-        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d}\n",
+        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"wifi_step\":\"%s\",\"tls_step\":\"%s\"}\n",
         ret ? "false" : "true", ret, names[atomic_get(&stage)],
-        https_poc_active() ? "true" : "false", (int)atomic_get(&last_error), (int)atomic_get(&bytes_sent));
+        https_poc_active() ? "true" : "false", (int)atomic_get(&last_error), (int)atomic_get(&bytes_sent),
+        wifi_station_last_step(), tls_steps[atomic_get(&tls_step)]);
 }
 
 int https_poc_register(void)

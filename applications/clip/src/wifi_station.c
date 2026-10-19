@@ -18,6 +18,15 @@ static K_SEM_DEFINE(ready_sem, 0, 1);
 static atomic_t got_ip;
 static atomic_t failure;
 static atomic_t radio_ready;
+enum { STA_IDLE, STA_INTERFACE, STA_READY, STA_REGULATORY, STA_CONNECT,
+       STA_DHCP, STA_COEX_NON_PTA, STA_COEX_PTA, STA_CONNECTED };
+static atomic_t last_step;
+const char *wifi_station_last_step(void)
+{
+    static const char *const steps[] = {"idle", "interface_up", "radio_ready",
+        "regulatory", "connect_request", "dhcp", "coex_non_pta", "coex_pta", "connected"};
+    return steps[atomic_get(&last_step)];
+}
 static struct net_mgmt_event_callback wifi_events, ipv4_events;
 
 static void ready(bool value)
@@ -57,6 +66,7 @@ int wifi_init(void)
 
 int wifi_station_connect(const char *ssid, const char *password, atomic_t *cancel)
 {
+    atomic_set(&last_step, STA_INTERFACE);
     struct net_if *iface = net_if_get_first_wifi();
     if (!iface) { return -ENODEV; }
     atomic_clear(&got_ip);
@@ -65,12 +75,14 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
     int ret = net_if_up(iface);
     if (ret && ret != -EALREADY) { return ret; }
     int64_t end = k_uptime_get() + 30000;
+    atomic_set(&last_step, STA_READY);
     while (!atomic_get(&radio_ready)) {
         k_sem_take(&ready_sem, K_MSEC(100));
         if (atomic_get(cancel)) { return -ECANCELED; }
         if (k_uptime_get() >= end) { return -ETIMEDOUT; }
     }
     struct wifi_reg_domain domain = {.oper = WIFI_MGMT_SET};
+    atomic_set(&last_step, STA_REGULATORY);
     memcpy(domain.country_code, config_get_wifi_reg_domain(), 2);
     ret = net_mgmt(NET_REQUEST_WIFI_REG_DOMAIN, iface, &domain, sizeof(domain));
     if (ret) { return ret; }
@@ -81,8 +93,10 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
         .channel = WIFI_CHANNEL_ANY, .band = WIFI_FREQ_BAND_2_4_GHZ,
     };
     net_dhcpv4_start(iface);
+    atomic_set(&last_step, STA_CONNECT);
     ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &req, sizeof(req));
     if (ret) { return ret; }
+    atomic_set(&last_step, STA_DHCP);
     while (!atomic_get(&got_ip)) {
         if (atomic_get(cancel)) { return -ECANCELED; }
         if (atomic_get(&failure)) { return -ENETUNREACH; }
@@ -93,13 +107,16 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
     /* Match the existing AP path: configure only after the radio is running. */
     bool separate = IS_ENABLED(CONFIG_COEX_SEP_ANTENNAS);
     bool ble = IS_ENABLED(CONFIG_SR_PROTOCOL_BLE);
+    atomic_set(&last_step, STA_COEX_NON_PTA);
     ret = nrf_wifi_coex_config_non_pta(separate, ble);
     if (!ret) {
+        atomic_set(&last_step, STA_COEX_PTA);
         ret = nrf_wifi_coex_config_pta(NRF_WIFI_PTA_WLAN_OP_BAND_2_4_GHZ,
                                      separate, ble);
     }
     if (ret) { return ret; }
 #endif
+    atomic_set(&last_step, STA_CONNECTED);
     return 0;
 }
 

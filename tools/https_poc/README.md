@@ -78,6 +78,19 @@ python3 tools/https_poc/device.py --port /dev/cu.usbmodemXXXX --cancel
 
 对应命令：`AT+NETCFG=ssid,password`、`AT+UPLOADCFG=host,port,device,token`、`AT+UPTIME=Unix秒`、`AT+UPLOAD=session:片段号`、`AT+UPLOAD?`、`AT+UPLOADCANCEL`。配置和上传控制仅接受 USB，响应不返回凭据。
 
+`AT+UPLOAD?` 的 `wifi_step` 是最近一次联网操作的子步骤：接口启动、无线电就绪、
+监管域、连接请求、DHCP 或共存配置。失败清理后保留该步骤及 `last_error`，
+用于定位错误；它不表示接口当前仍连接，也不包含 SSID 或密码。
+
+`tls_step` 进一步区分地址解析、socket 创建、证书绑定、验证策略、主机名、
+超时设置、握手及 HTTP。`stage:tls` 覆盖 TLS socket 配置与握手，
+Wi-Fi 已连接时不会继续显示为 `connecting`。测试证书为 P-256 ECDSA，
+构建显式启用 ECDSA 验证和 ECDHE-ECDSA，并用编译断言防止退回仅 PSK 的配置。
+
+`hardware_probe.py`（另需 `pyserial`）可上传指定会话的片段 1，采集系统堆与
+线程栈，并将接收文件与已有下载参考文件逐字节比较；参数见 `--help`。
+它不创建或删除录音、不刷机，配置与测量结果保持在本机私有目录。
+
 ## 5. 尚需样机完成的验收
 
 外置补丁冷启动；Station/DHCP/DNS；正确证书与错误 CA／域名／时间；真实录音哈希及解码；取消、断网和重复上传；至少 20 次冷握手；录音／上传交替；堆与线程栈峰值；失败后恢复录音。
