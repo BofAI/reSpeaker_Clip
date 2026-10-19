@@ -59,7 +59,9 @@ def migrate(data):
     if len(data) != END-START: raise ValueError("Wrong original image size")
     source = open_image(data, True)
     before = inventory(source)
-    target = LittleFS(block_count=NEW_SIZE//BLOCK, mount=False, **GEOMETRY)
+    # Model erased NOR so unused blocks stay 0xff and need no needless writes.
+    target = LittleFS(context=UserContext(buffer=bytearray(b"\xff"*NEW_SIZE)),
+                      block_count=NEW_SIZE//BLOCK, mount=False, **GEOMETRY)
     target.format(); target.mount()
     for entry in before:
         path = entry["path"]
