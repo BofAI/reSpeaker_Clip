@@ -29,12 +29,13 @@ void wifi_station_get_network(struct wifi_station_network *network)
     k_spin_unlock(&network_lock, key);
 }
 enum { STA_IDLE, STA_INTERFACE, STA_READY, STA_REGULATORY, STA_CONNECT,
-       STA_DHCP, STA_COEX_NON_PTA, STA_COEX_PTA, STA_CONNECTED };
+       STA_DHCP, STA_COEX_NON_PTA, STA_COEX_PTA, STA_CONNECTED, STA_PS_OFF };
 static atomic_t last_step;
 const char *wifi_station_last_step(void)
 {
     static const char *const steps[] = {"idle", "interface_up", "radio_ready",
-        "regulatory", "connect_request", "dhcp", "coex_non_pta", "coex_pta", "connected"};
+        "regulatory", "connect_request", "dhcp", "coex_non_pta", "coex_pta", "connected",
+        "ps_disable_request"};
     return steps[atomic_get(&last_step)];
 }
 static struct net_mgmt_event_callback wifi_events, ipv4_events;
@@ -143,6 +144,18 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
     if (ret) { return ret; }
 #else
     wifi_diag_capture(WIFI_DIAG_COEX, 0);
+#endif
+#ifdef CONFIG_CLIP_HTTPS_STA_PS_OFF
+    /* Change only 802.11 station PS, after association and all setup callbacks.
+     * Do not disable the driver's low-power support or query live RPU stats.
+     * A successful request means command acceptance, not over-air proof. */
+    struct wifi_ps_params ps = {
+        .type = WIFI_PS_PARAM_STATE,
+        .enabled = WIFI_PS_DISABLED,
+    };
+    atomic_set(&last_step, STA_PS_OFF);
+    ret = net_mgmt(NET_REQUEST_WIFI_PS, iface, &ps, sizeof(ps));
+    if (ret) { return ret; }
 #endif
     atomic_set(&last_step, STA_CONNECTED);
     return 0;

@@ -20,6 +20,15 @@ config CLIP_HTTPS_POC
 	  Station-only, stopped-recording upload. Uses CDC-only USB and disables
 	  application OTA during this experiment. Requires a supplied test CA.
 
+config CLIP_HTTPS_STA_PS_OFF
+	bool "Disable station power save before experimental HTTPS upload"
+	depends on CLIP_HTTPS_POC
+	default n
+	help
+	  Diagnostic comparison only: request WIFI_PS_DISABLED after DHCP and
+	  coexistence setup. Keep driver low-power support, TCP timeout, buffers,
+	  and idle radio shutdown unchanged. Fail the job if the request fails.
+
 module = CLIP
 module-str = Clip Application
 source "subsys/logging/Kconfig.template.log_config"
