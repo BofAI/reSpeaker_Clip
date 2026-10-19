@@ -94,6 +94,20 @@ recording mode, AP/USB/log off. On a timeout, inspect state after reconnecting
 before running another experiment. These controls are not a baseline-firmware
 A/B test and cannot identify an individual failed allocation by themselves.
 
+For a firmware that releases audio state on STOP, validate repeated enhanced
+recording, pause/resume and AP startup after every session:
+
+```sh
+python3 tools/runtime_resources/scenarios.py --address DEVICE_UUID \
+  --output /tmp/clip-audio-release --record-seconds 12 \
+  --repeat-enhanced --pause-resume --ap-after-each --expect-release
+```
+
+`--expect-release` checks post-STOP system heap allocation against the initial
+baseline plus 512 bytes for small network bookkeeping. It is a regression
+check, not a whole-device free-RAM guarantee. File downloads verify sequence,
+size and CRC; decode the resulting recordings separately.
+
 CPU is scheduler busy time divided by busy plus idle time over an interval,
 in basis points (10000 = 100%). It depends on the SDK's cycle accounting and
 is not a per-interrupt profiler. The first query, subsecond intervals and

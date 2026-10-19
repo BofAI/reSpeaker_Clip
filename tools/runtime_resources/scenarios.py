@@ -57,6 +57,9 @@ async def run(args):
                 while time.monotonic() < end:
                     await asyncio.sleep(min(interval, max(0, end - time.monotonic())))
                     status = await query("AT+GSTAT")
+                    if phase.startswith("recording_"):
+                        assert status["data"]["state"] == "RECORDING", status
+                        assert status["data"]["recording"] is True, status
                     stats = await query("AT+RES")
                     assert stats["data"]["build"] == "runtime-0.1.2"
                     save("sample", {"status": status["data"], "resources": stats["data"]})
@@ -73,7 +76,8 @@ async def run(args):
             assert usb == "off", "Disable USB before running recording measurements"
             await query("AT+LOG?")
             await query("AT+VERSION")
-            assert (await query("AT+RES"))["data"]["schema"] == 1
+            initial_resources = (await query("AT+RES"))["data"]
+            assert initial_resources["schema"] == 1
             # Restore modes/AP state even if a test fails. Leave USB and logs as found.
             original_mode = state["mode"]
             wifi = (await query("AT+WIFI?", redact=True))["data"]
@@ -89,18 +93,43 @@ async def run(args):
                 await asyncio.sleep(46)
                 await sample(18)
                 await stacks()
-                for mode in ("normal", "enhanced"):
-                    phase = "recording_" + mode
+                modes = ("normal", "enhanced") + (("enhanced",) if args.repeat_enhanced else ())
+                for number, mode in enumerate(modes):
+                    phase = "recording_" + mode + ("_restart" if number == 2 else "")
                     await query("AT+START=" + mode)
                     recording = True
-                    await sample(args.record_seconds)
+                    if args.pause_resume and number == 2:
+                        await sample(args.record_seconds / 2)
+                        await query("AT+PAUSE")
+                        paused = (await query("AT+GSTAT"))["data"]
+                        assert paused["state"] == "PAUSED", paused
+                        await query("AT+RES")
+                        await asyncio.sleep(2)
+                        await query("AT+RESUME")
+                        await sample(args.record_seconds / 2)
+                    else:
+                        await sample(args.record_seconds)
                     await stacks()
                     stopped = await query("AT+STOP")
                     recording = False
+                    stopped_resources = (await query("AT+RES"))["data"]
+                    if args.expect_release:
+                        # Permit small network bookkeeping retained after the first AP.
+                        assert stopped_resources["heap_allocated"] <= initial_resources["heap_allocated"] + 512, stopped_resources
                     sid = stopped["data"]["session"]
                     assert len(sid) == 14 and sid.isdecimal()
                     sessions.append(sid)
                     await query("AT+LIST=" + sid)
+                    if args.ap_after_each:
+                        phase = "ap_after_" + mode + ("_restart" if number == 2 else "")
+                        await query("AT+WIFI=on", redact=True)
+                        ap_enabled = True
+                        assert (await query("AT+WIFI?", redact=True))["data"]["running"]
+                        await query("AT+RES")
+                        save("post_record_ap", {"running": True, "session": sid})
+                        await query("AT+WIFI=off")
+                        ap_enabled = False
+                        await query("AT+RES")
 
                 phase = "ble_download"
                 frames = asyncio.Queue()
@@ -201,9 +230,15 @@ def main():
     parser.add_argument("--address", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--record-seconds", type=int, default=30)
+    parser.add_argument("--repeat-enhanced", action="store_true")
+    parser.add_argument("--pause-resume", action="store_true")
+    parser.add_argument("--ap-after-each", action="store_true")
+    parser.add_argument("--expect-release", action="store_true")
     args = parser.parse_args()
     if args.record_seconds < 10:
         parser.error("record-seconds must be at least 10")
+    if args.pause_resume and not args.repeat_enhanced:
+        parser.error("pause-resume requires repeat-enhanced")
     asyncio.run(run(args))
 
 

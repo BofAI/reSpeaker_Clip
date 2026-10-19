@@ -633,11 +633,17 @@ static int audio_stop_recording_internal(void)
     /* Power off microphone to save power */
     mic_power_off();
 
+    /* The audio thread has finished encoding and closing the session. Release
+     * its working state before stop_done_sem lets a caller start networking.
+     * A new recording recreates the encoder and DSP through the normal init path.
+     */
+    cleanup_opus_encoder();
+#ifdef CONFIG_SPEEXDSP
+    cleanup_speex_preprocessor();
+#endif
+
     LOG_INF("Recording stopped, releasing CPU boost");
     clip_cpu_boost_release();
-
-    /* Note: Keep encoder and DSP initialized for next recording
-     * They will be reinitialized only if parameters change */
 
     return 0;
 }
@@ -1054,6 +1060,7 @@ static void cleanup_opus_encoder(void)
         opus_encoder_destroy(opus_encoder);
         opus_encoder = NULL;
     }
+    encoder_params.initialized = false;
 }
 
 #ifdef CONFIG_SPEEXDSP
@@ -1132,6 +1139,8 @@ static void cleanup_speex_preprocessor(void)
         speex_preprocess_state_destroy(speex_pp);
         speex_pp = NULL;
     }
+    speex_enabled = false;
+    dsp_params.initialized = false;
 }
 #endif
 

@@ -52,8 +52,11 @@ async def run(args):
             save(command, {"response": result, "elapsed_s": time.monotonic()-started})
             return result.get("data", result)
 
-        async def snapshot(label):
+        async def snapshot(label, expected_state=None):
             status = await query("AT+GSTAT")
+            if expected_state is not None:
+                assert status["state"] == expected_state, status
+                assert status["recording"] is (expected_state == "RECORDING"), status
             stats = await query("AT+RES")
             assert stats["build"] == "runtime-0.1.2"
             save("snapshot", {"label": label, "status": status, "resources": stats})
@@ -76,12 +79,12 @@ async def run(args):
             started = await query("AT+START=" + mode)
             try:
                 await asyncio.sleep(seconds / 2)
-                await snapshot(mode + "_recording")
+                await snapshot(mode + "_recording", "RECORDING")
                 await asyncio.sleep(seconds / 2)
             finally:
                 if client.is_connected:
                     await query("AT+STOP")
-            await snapshot(mode + "_stopped")
+            await snapshot(mode + "_stopped", "IDLE")
             save("recording_session", {"mode": mode, "session": started["session"]})
 
         try:
