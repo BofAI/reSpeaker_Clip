@@ -18,6 +18,15 @@ static K_SEM_DEFINE(ready_sem, 0, 1);
 static atomic_t got_ip;
 static atomic_t failure;
 static atomic_t radio_ready;
+static struct wifi_station_network last_network;
+static struct k_spinlock network_lock;
+
+void wifi_station_get_network(struct wifi_station_network *network)
+{
+    k_spinlock_key_t key = k_spin_lock(&network_lock);
+    *network = last_network;
+    k_spin_unlock(&network_lock, key);
+}
 enum { STA_IDLE, STA_INTERFACE, STA_READY, STA_REGULATORY, STA_CONNECT,
        STA_DHCP, STA_COEX_NON_PTA, STA_COEX_PTA, STA_CONNECTED };
 static atomic_t last_step;
@@ -66,6 +75,9 @@ int wifi_init(void)
 
 int wifi_station_connect(const char *ssid, const char *password, atomic_t *cancel)
 {
+    k_spinlock_key_t key = k_spin_lock(&network_lock);
+    memset(&last_network, 0, sizeof(last_network));
+    k_spin_unlock(&network_lock, key);
     atomic_set(&last_step, STA_INTERFACE);
     struct net_if *iface = net_if_get_first_wifi();
     if (!iface) { return -ENODEV; }
@@ -103,6 +115,17 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
         if (k_uptime_get() >= end) { return -ETIMEDOUT; }
         k_sleep(K_MSEC(100));
     }
+    struct net_in_addr *ip = net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED);
+    if (!ip) { return -EADDRNOTAVAIL; }
+    struct net_in_addr mask = net_if_ipv4_get_netmask_by_addr(iface, ip);
+    struct net_in_addr gateway = net_if_ipv4_get_gw(iface);
+    struct wifi_station_network network = {0};
+    net_addr_ntop(AF_INET, ip, network.ip, sizeof(network.ip));
+    net_addr_ntop(AF_INET, &mask, network.netmask, sizeof(network.netmask));
+    net_addr_ntop(AF_INET, &gateway, network.gateway, sizeof(network.gateway));
+    key = k_spin_lock(&network_lock);
+    last_network = network;
+    k_spin_unlock(&network_lock, key);
 #ifdef CONFIG_NRF70_SR_COEX
     /* Match the existing AP path: configure only after the radio is running. */
     bool separate = IS_ENABLED(CONFIG_COEX_SEP_ANTENNAS);

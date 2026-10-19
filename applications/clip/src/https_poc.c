@@ -429,11 +429,14 @@ static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
     memset(args, 0, sizeof(args));
 reply:
     memset(args, 0, sizeof(args));
+    struct wifi_station_network network;
+    wifi_station_get_network(&network);
     return snprintf(response, length,
-        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"wifi_step\":\"%s\",\"tls_step\":\"%s\"}\n",
+        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"wifi_step\":\"%s\",\"tls_step\":\"%s\",\"wifi_ip\":\"%s\",\"wifi_netmask\":\"%s\",\"wifi_gateway\":\"%s\"}\n",
         ret ? "false" : "true", ret, names[atomic_get(&stage)],
         https_poc_active() ? "true" : "false", (int)atomic_get(&last_error), (int)atomic_get(&bytes_sent),
-        wifi_station_last_step(), tls_steps[atomic_get(&tls_step)]);
+        wifi_station_last_step(), tls_steps[atomic_get(&tls_step)],
+        network.ip, network.netmask, network.gateway);
 }
 
 int https_poc_register(void)

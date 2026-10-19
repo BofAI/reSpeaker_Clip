@@ -81,6 +81,9 @@ python3 tools/https_poc/device.py --port /dev/cu.usbmodemXXXX --cancel
 `AT+UPLOAD?` 的 `wifi_step` 是最近一次联网操作的子步骤：接口启动、无线电就绪、
 监管域、连接请求、DHCP 或共存配置。失败清理后保留该步骤及 `last_error`，
 用于定位错误；它不表示接口当前仍连接，也不包含 SSID 或密码。
+`wifi_ip`、`wifi_netmask` 和 `wifi_gateway` 保存最近一次 DHCP 完成后的
+IPv4 地址、掩码和网关，供局域网路由诊断。每次新任务联网时清空，失败清理后
+保留；它们同样不表示接口当前仍在线。
 
 `tls_step` 进一步区分地址解析、socket 创建、证书绑定、验证策略、主机名、
 超时设置、握手及 HTTP。`stage:tls` 覆盖 TLS socket 配置与握手，
