@@ -37,11 +37,11 @@ class Connection:
             if isinstance(value, dict) and "event" not in value:
                 self.queue.put_nowait(value)
 
-    async def request(self, command):
+    async def request(self, command, *, timeout=20):
         async with self.lock:
             await self.client.write_gatt_char(RX, command.encode(), response=False)
             try:
-                result = await asyncio.wait_for(self.queue.get(), 20)
+                result = await asyncio.wait_for(self.queue.get(), timeout)
             except asyncio.TimeoutError:
                 # No transaction IDs: late replies cannot be safely reused.
                 await self.client.disconnect()

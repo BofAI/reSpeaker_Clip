@@ -55,6 +55,27 @@ is not an unconnected sleep/current measurement. Use an external power meter
 for battery current and energy. The recorder produces local audio during
 recording scenarios; retain it outside Git.
 
+For an authorized workload test, `scenarios.py` creates normal and enhanced
+recordings, samples their resources, downloads both over BLE with size/CRC32
+checks, then measures AP idle. It temporarily enables the AP, restores the
+original recording mode, and leaves recordings on the SD card. USB and the AP
+must initially be off. Run only when creating local test audio is intended:
+
+```sh
+python3 tools/runtime_resources/scenarios.py --address DEVICE_UUID \
+  --output /tmp/clip-workloads --record-seconds 30
+```
+
+The output directory must not exist. CPU windows that cross transfer start/end
+must be excluded when describing sustained transfer load; timestamps are
+retained for this purpose. Very short BLE downloads may have no full interval.
+AP startup has a 60-second response timeout. If any timeout disconnects BLE,
+automatic cleanup cannot run: reconnect and explicitly check/stop recording
+and the AP before starting another test. A timed-out command may have succeeded.
+
+Device measurements and the observed AP-start failure after enhanced recording
+are documented in `docs/runtime-resources-0.1.2-results.md`.
+
 CPU is scheduler busy time divided by busy plus idle time over an interval,
 in basis points (10000 = 100%). It depends on the SDK's cycle accounting and
 is not a per-interrupt profiler. The first query, subsecond intervals and
