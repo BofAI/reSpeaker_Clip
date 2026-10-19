@@ -369,7 +369,8 @@ static void worker(void *a, void *b, void *c)
         }
     }
 }
-K_THREAD_DEFINE(https_worker, 6144, worker, NULL, NULL, NULL, 7, 0, 0);
+/* Full ECDSA handshakes measured 5816 B; 6 KiB left only 328 B. */
+K_THREAD_DEFINE(https_worker, 8192, worker, NULL, NULL, NULL, 7, 0, 0);
 
 static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
 {

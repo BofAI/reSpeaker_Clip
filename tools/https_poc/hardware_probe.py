@@ -83,6 +83,9 @@ def run(args):
                         status = query("AT+UPLOAD?")
                         if not status["active"]:
                             active = False
+                            # The sample before UPLOAD? may precede cleanup by
+                            # a few milliseconds. Measure again after inactive.
+                            resource = query("AT+RES")["data"]
                             break
                         if time.monotonic() - started > 330:
                             raise TimeoutError("Upload exceeded its device deadline")

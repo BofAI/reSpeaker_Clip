@@ -148,6 +148,12 @@ int wifi_off(void)
 {
     struct net_if *iface = net_if_get_first_wifi();
     if (!iface) { return -ENODEV; }
+    /* Preparation can fail or be cancelled before net_if_up(). The radio
+     * context then does not exist: do not send firmware/coexistence commands. */
+    if (!net_if_is_admin_up(iface)) {
+        atomic_clear(&got_ip);
+        return 0;
+    }
     net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
     net_dhcpv4_stop(iface);
     atomic_clear(&got_ip);
