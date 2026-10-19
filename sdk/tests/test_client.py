@@ -10,6 +10,24 @@ from conftest import FakeTransport
 
 
 @pytest.mark.asyncio
+async def test_optional_resources_and_argument_validation() -> None:
+    transport = FakeTransport([
+        {"ok": True, "data": {"cpu_bp": -1}},
+        {"ok": True, "data": {"index": 2, "stack_valid": False}},
+        {"ok": False, "msg": "Unknown command"},
+    ])
+    async with ClipClient(transport) as client:
+        assert await client.resource_stats() == {"cpu_bp": -1}
+        assert (await client.resource_stats(2))["stack_valid"] is False
+        for index in (-1, 256, True, "0", 1.5):
+            with pytest.raises(ValueError):
+                await client.resource_stats(index)
+        with pytest.raises(CommandError, match="Unknown command"):
+            await client.resource_stats()
+    assert transport.commands == ["AT+RES", "AT+RES=2", "AT+RES"]
+
+
+@pytest.mark.asyncio
 async def test_current_firmware_status_and_storage_commands() -> None:
     transport = FakeTransport(
         [

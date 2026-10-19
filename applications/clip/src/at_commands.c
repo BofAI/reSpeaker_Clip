@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include "at_commands.h"
 #include "at_server.h"
+#include "resource_stats.h"
 #include "clip.h"
 #include "clip_event.h"
 #include "config.h"
@@ -2056,6 +2057,10 @@ int at_commands_register(void)
     err = at_server_register_cmd(&log_cmd);
     if (err) return err;
 
+#if defined(CONFIG_CLIP_RESOURCE_STATS)
+    err = resource_stats_register();
+    if (err) return err;
+#endif
     LOG_INF("AT commands registered");
     return 0;
 }

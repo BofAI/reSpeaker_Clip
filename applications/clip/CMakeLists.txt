@@ -5,6 +5,8 @@ cmake_minimum_required(VERSION 3.20)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(clip)
 
+target_sources_ifdef(CONFIG_CLIP_RESOURCE_STATS app PRIVATE src/resource_stats.c)
+
 # Include directories
 target_include_directories(app PRIVATE include)
 

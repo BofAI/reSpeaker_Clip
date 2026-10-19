@@ -63,3 +63,11 @@ clip.web --transport udp
 `clip.record` tools use the same package API. `clip.web` adds a local browser
 panel when installed with the `web` extra; use the typed methods for
 production code.
+# Instrumented firmware resource queries
+
+`await client.resource_stats()` queries optional `AT+RES` summary counters.
+`await client.resource_stats(thread_index=0)` queries one thread's stack high
+water. Both return the raw `data` dictionary; stock firmware raises
+`CommandError`. See `docs/protocol.md` in the firmware repository for units,
+counter lifetime and measurement limitations. CPU requires queries separated
+by at least one second; `cpu_bp=-1` means unavailable.

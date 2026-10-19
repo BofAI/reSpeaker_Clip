@@ -434,6 +434,15 @@ config CLIP_BATTERY_DISPLAY_MAX_STEP
 # Debug Configuration
 # =============================================================================
 
+config CLIP_RESOURCE_STATS
+	bool "Enable on-demand AT resource measurements"
+	default n
+	depends on THREAD_MONITOR && THREAD_NAME && INIT_STACKS
+	depends on SYS_HEAP_RUNTIME_STATS && THREAD_RUNTIME_STATS
+	help
+	  Add read-only AT+RES CPU, system heap and thread stack measurements.
+	  No periodic worker is created. Intended for instrumented test images.
+
 config CLIP_DEBUG_STATS
 	bool "Enable periodic thread stack and heap usage logging"
 	default n

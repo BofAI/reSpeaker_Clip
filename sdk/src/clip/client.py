@@ -105,6 +105,23 @@ class ClipClient:
             raise ProtocolError("AT+DEVICE response did not contain device")
         return name
 
+    async def resource_stats(self, thread_index: int | None = None) -> dict[str, Any]:
+        """Read instrumented-firmware resources or one thread's stack high water.
+
+        Stock firmware rejects this optional command. CPU needs two queries at
+        least one second apart; cpu_bp=-1 means no valid interval yet.
+        """
+        if thread_index is not None and (
+            type(thread_index) is not int or not 0 <= thread_index <= 255
+        ):
+            raise ValueError("thread_index must be an integer from 0 to 255")
+        command = "AT+RES" if thread_index is None else f"AT+RES={thread_index}"
+        response = await self.request(command)
+        data = response.get("data")
+        if not isinstance(data, dict):
+            raise ProtocolError("AT+RES response did not contain data")
+        return data
+
     async def firmware_version(self) -> str:
         response = await self.request("AT+VERSION")
         version = response.get("firmware")

@@ -2780,3 +2780,25 @@ mode** (`MCUBOOT_MODE_OVERWRITE_ONLY` is the board default in
 Both are attached to each GitHub Release. Host-tool procedures (mcumgr CLI,
 nRF Connect, USB serial DFU fallback) are covered in
 [`docs/usb_dfu.md`](usb_dfu.md).
+# Optional runtime instrumentation (`CLIP_RESOURCE_STATS`)
+
+Instrumented builds add `AT+RES` (also `AT+RES?`) and read-only pagination
+`AT+RES=<thread index 0..255>`. Stock builds reject the command.
+Success uses `{"ok":true,"data":{...}}`; invalid arguments or an absent index
+use `{"ok":false,"msg":"..."}`.
+
+Summary fields: `schema=1`, `build="runtime-0.1.2"`, `uptime_ms` (uint32,
+wraps after approximately 49.7 days), `cpu_bp` (basis points; -1 unavailable),
+`interval_ms`, `heap_allocated`, `heap_free`, `heap_peak` (bytes).
+CPU needs two queries at least 1000 ms apart. Short queries do not move the
+baseline. A counter reset invalidates that interval. Heap values cover only
+the system heap, not the independent libc allocator or dedicated pools.
+
+Thread fields: `index`, `total`, `id` (numeric thread address), `name`
+(sanitized printable ASCII, max 31 characters), `stack_valid`, `stack_size`,
+`stack_free`, `stack_peak` (bytes). When `stack_valid=false`, free/peak are
+unavailable and encoded as zero. High water is cumulative, not instantaneous.
+Indexes may change across queries; identify threads by ID and name. Each
+request scans only one stack with the thread monitor lock held. No settings
+or workloads are changed by either form. See `tools/runtime_resources` for
+measurement limitations and collection instructions.
