@@ -14,6 +14,7 @@
 #include <ctype.h>
 #include "https_poc.h"
 #include "wifi_diag.h"
+#include "wifi_trace.h"
 #include "at_server.h"
 #include "transport.h"
 #include "storage.h"
@@ -110,6 +111,7 @@ bool https_poc_command_allowed(const char *name)
     /* Read-only instrumentation must remain available during TLS/upload. */
     if (!strcmp(name, "RES")) { return true; }
     if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETDIAG")) { return true; }
+    if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETTRACE")) { return true; }
     /* A deliberately small control surface also excludes deferred erase/reboot
      * commands which could outlive the AT handler and race a subsequent job. */
     if (https_poc_active()) {
@@ -285,6 +287,13 @@ static int tls_connect(void)
     struct zsock_addrinfo *address = NULL;
     int ret = zsock_getaddrinfo(host, port, &hints, &address);
     if (ret) { return -EHOSTUNREACH; }
+#ifdef CONFIG_CLIP_WIFI_DIAG
+    struct net_in_addr local = {0};
+    struct wifi_station_network network;
+    wifi_station_get_network(&network);
+    net_addr_pton(AF_INET, network.ip, &local);
+    wifi_trace_peer(((struct sockaddr_in *)address->ai_addr)->sin_addr.s_addr, local.s_addr);
+#endif
     atomic_set(&tls_step, TLS_SETUP_SOCKET);
     int sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TLS_1_2);
     if (sock < 0) { zsock_freeaddrinfo(address); return -errno; }

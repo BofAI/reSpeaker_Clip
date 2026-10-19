@@ -21,6 +21,8 @@ class NetdiagTest(unittest.TestCase):
 #include <string.h>
 #define CONFIG_CLIP_WIFI_DIAG 1
 #include "wifi_diag.h"
+#include "wifi_trace.h"
+void wifi_trace_get(struct wifi_trace_stats *out) { memset(out, 0xff, sizeof(*out)); }
 #define ARG_UNUSED(x) (void)(x)
 #define TRANSPORT_TYPE_USB 2
 #define AT_CMD_SET 1
@@ -58,7 +60,7 @@ static int net_mgmt(int request, struct net_if *iface, void *out, size_t size) {
     struct net_stats s={.bytes={UINT64_C(0x100000002),3},.tcp={1,0,0}};
     memcpy(out,&s,size); return 0;
 }
-struct at_cmd_ctx { int transport_type; const char *args; };
+struct at_cmd_ctx { int transport_type; const char *args; const char *name; };
 struct at_command {
     const char *name; int flags;
     int (*handler)(struct at_cmd_ctx *, char *, size_t);
@@ -69,7 +71,7 @@ static int at_server_register_cmd(const struct at_command *c) { (void)c; return 
 int main(void) {
     assert(wifi_diag_register() == 0);
     char out[1024];
-    struct at_cmd_ctx ctx={TRANSPORT_TYPE_USB,"3"};
+    struct at_cmd_ctx ctx={TRANSPORT_TYPE_USB,"3","NETDIAG"};
     wifi_diag_reset();
     diagnostic(&ctx,out,sizeof(out));
     assert(strstr(out,"\"valid\":false") && queries == 0);
@@ -82,6 +84,10 @@ int main(void) {
     assert(strstr(out,"\"valid\":true") && strstr(out,"\"tx_bytes\":2"));
     assert(strstr(out,"\"result\":-116") && strstr(out,"\"flags\":11"));
     assert(strstr(out,"\"link_ok\":1") && strstr(out,"\"link_error\":1"));
+    ctx.name="NETTRACE";
+    assert(diagnostic(&ctx,out,sizeof(out)) > 0);
+    assert(strstr(out,"\"rx_peer\":4294967295") && strstr(out,"\"syn_result\":-1"));
+    ctx.name="NETDIAG";
     char small[8];
     assert(diagnostic(&ctx,small,sizeof(small)) == -AT_ERR_NOMEM && small[0] == 0);
     const char *bad[]={"", "4", "-1", "10", "0x0", NULL};

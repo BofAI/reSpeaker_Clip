@@ -8,8 +8,10 @@
 #include "at_server.h"
 #include "transport.h"
 #include "wifi_diag.h"
+#include "wifi_trace.h"
 
 struct snapshot {
+    struct wifi_trace_stats trace;
     uint32_t ms, flags, tx_bytes, rx_bytes, ip_tx, ip_rx, ip_drop;
     uint32_t tcp_tx, tcp_rx, tcp_drop, processing_error, link_ok, link_error;
     int link_status, result, stats_error;
@@ -58,11 +60,13 @@ void wifi_diag_capture(enum wifi_diag_point point, int result)
         .link_status = (int)atomic_get(&link_status), .result = result,
         .stats_error = ret, .valid = true,
     };
+    wifi_trace_get(&s.trace);
     /* Software counters are approximate concurrent observations, not an atomic
      * cross-layer transaction. Only publication to the AT reader is locked. */
     k_spinlock_key_t key = k_spin_lock(&sample_lock);
     samples[point] = s;
     k_spin_unlock(&sample_lock, key);
+
 }
 
 static int diagnostic(struct at_cmd_ctx *ctx, char *out, size_t size)
@@ -76,6 +80,23 @@ static int diagnostic(struct at_cmd_ctx *ctx, char *out, size_t size)
     struct snapshot s = samples[point];
     unsigned int job = generation;
     k_spin_unlock(&sample_lock, key);
+    if (!strcmp(ctx->name, "NETTRACE")) {
+        const struct wifi_trace_stats *t = &s.trace;
+        int n = snprintf(out, size,
+            "{\"ok\":true,\"data\":{\"schema\":1,\"job\":%u,\"point\":%u,\"valid\":%s,\"ms\":%u,"
+            "\"driver_rx\":%u,\"driver_nomem\":%u,\"driver_reject\":%u,\"rx_peer\":%u,\"rx_valid\":%u,"
+            "\"arp_input\":%u,\"arp_accept\":%u,\"arp_pending\":%u,\"arp_no_pending\":%u,"
+            "\"arp_release\":%u,\"arp_release_error\":%u,\"tx_syn\":%u,\"tx_syn_error\":%u,"
+            "\"tx_arp\":%u,\"tx_arp_error\":%u,\"rx_ms\":%u,\"syn_ms\":%u,"
+            "\"release_result\":%d,\"syn_result\":%d}}\n",
+            job, point, s.valid ? "true" : "false", s.ms,
+            t->driver_rx, t->driver_nomem, t->driver_reject, t->rx_peer, t->rx_valid,
+            t->arp_input, t->arp_accept, t->arp_pending, t->arp_no_pending,
+            t->arp_release, t->arp_release_error, t->tx_syn, t->tx_syn_error,
+            t->tx_arp, t->tx_arp_error, t->rx_ms, t->syn_ms, t->release_result, t->syn_result);
+        if (n < 0 || (size_t)n >= size) { if (size) { out[0] = 0; } return -AT_ERR_NOMEM; }
+        return n;
+    }
     int n = snprintf(out, size,
         "{\"ok\":true,\"data\":{\"schema\":1,\"job\":%u,\"point\":%u,\"valid\":%s,"
         "\"ms\":%u,\"flags\":%u,\"tx_bytes\":%u,\"rx_bytes\":%u,\"ip_tx\":%u,\"ip_rx\":%u,"
@@ -91,7 +112,9 @@ static int diagnostic(struct at_cmd_ctx *ctx, char *out, size_t size)
 int wifi_diag_register(void)
 {
     static const struct at_command command = {"NETDIAG", AT_CMD_SET, diagnostic};
+    static const struct at_command trace = {"NETTRACE", AT_CMD_SET, diagnostic};
     int ret = at_server_register_cmd(&command);
+    if (!ret) { ret = at_server_register_cmd(&trace); }
     if (!ret) { net_if_register_link_cb(&link_callback, link_done); }
     return ret;
 }

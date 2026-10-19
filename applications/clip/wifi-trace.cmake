@@ -1,0 +1,38 @@
+# Only this diagnostic image uses generated SDK source copies. SDK stays intact.
+set(_trace_dir "${PROJECT_BINARY_DIR}/wifi_trace_sdk")
+execute_process(COMMAND "${PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/https_poc/instrument_network.py"
+    --zephyr "${ZEPHYR_BASE}" --output "${_trace_dir}"
+    RESULT_VARIABLE _trace_result)
+if(NOT _trace_result EQUAL 0)
+    message(FATAL_ERROR "Pinned SDK network diagnostics could not be generated")
+endif()
+
+function(clip_trace_source target relative)
+    set(original "${ZEPHYR_BASE}/${relative}")
+    get_filename_component(filename "${original}" NAME)
+    get_filename_component(parent "${original}" DIRECTORY)
+    get_target_property(sources ${target} SOURCES)
+    get_target_property(base ${target} SOURCE_DIR)
+    set(updated)
+    set(found 0)
+    foreach(source IN LISTS sources)
+        get_filename_component(absolute "${source}" ABSOLUTE BASE_DIR "${base}")
+        if(absolute STREQUAL original)
+            list(APPEND updated "${_trace_dir}/${filename}")
+            math(EXPR found "${found} + 1")
+        else()
+            list(APPEND updated "${source}")
+        endif()
+    endforeach()
+    if(NOT found EQUAL 1)
+        message(FATAL_ERROR "SDK source target changed: ${target}: ${relative}")
+    endif()
+    set_property(TARGET ${target} PROPERTY SOURCES "${updated}")
+    target_include_directories(${target} PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include" "${parent}")
+endfunction()
+
+clip_trace_source(subsys__net__ip subsys/net/ip/net_core.c)
+clip_trace_source(subsys__net__l2__ethernet subsys/net/l2/ethernet/arp.c)
+clip_trace_source(subsys__net__l2__ethernet subsys/net/l2/ethernet/ethernet.c)
+clip_trace_source(nrf_wifi drivers/wifi/nrf_wifi/src/net_if.c)

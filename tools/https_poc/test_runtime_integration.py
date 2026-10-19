@@ -80,6 +80,7 @@ int main(void) {
         busy=state;
         assert(https_poc_command_allowed("RES"));
         assert(https_poc_command_allowed("NETDIAG"));
+        assert(https_poc_command_allowed("NETTRACE"));
         assert(https_poc_command_allowed("GSTAT"));
         assert(!https_poc_command_allowed("PAIR"));
         assert(!https_poc_command_allowed("DELETE"));
