@@ -32,6 +32,7 @@ int64_t k_uptime_get(void);
 void k_sleep(int);
 int uart_poll_in(const struct device *, uint8_t *);
 void uart_poll_out(const struct device *, uint8_t);
+void uart_irq_rx_enable(const struct device *);
 int flash_read(const struct device *, unsigned int, void *, size_t);
 int flash_write(const struct device *, unsigned int, const void *, size_t);
 int flash_erase(const struct device *, unsigned int, size_t);
@@ -45,6 +46,7 @@ int device_is_ready(const struct device *);
 #include <assert.h>
 #include <stdlib.h>
 struct device fake_device;
+void uart_irq_rx_enable(const struct device *d) { (void)d; }
 static uint8_t *flash_data, incoming[32], outgoing[20000];
 static size_t input_pos,input_size,output_size;
 static int writes,erases;

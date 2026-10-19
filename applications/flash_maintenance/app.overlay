@@ -1,0 +1,4 @@
+/* Make poll_out wait for FIFO space instead of silently discarding bytes. */
+&cdc_acm_uart {
+    hw-flow-control;
+};

@@ -121,6 +121,9 @@ int main(void)
     struct flash_pages_info page;
     if (flash_get_page_info_by_offs(nor, WRITE_START, &page) || page.size != ERASE_BYTES)
         return -EINVAL;
+    /* The next-generation CDC driver schedules its first OUT transfer only
+     * after RX is enabled, even when the application consumes via poll_in(). */
+    uart_irq_rx_enable(cdc);
     char line[128];
     size_t used = 0;
     bool overflow = false;
