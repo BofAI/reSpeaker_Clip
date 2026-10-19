@@ -89,6 +89,10 @@ IPv4 地址、掩码和网关，供局域网路由诊断。每次新任务联网
 超时设置、握手及 HTTP。`stage:tls` 覆盖 TLS socket 配置与握手，
 Wi-Fi 已连接时不会继续显示为 `connecting`。测试证书为 P-256 ECDSA，
 构建显式启用 ECDSA 验证和 ECDHE-ECDSA，并用编译断言防止退回仅 PSK 的配置。
+当前 SDK 的 `config_adjust_ssl.h` 仅通过旧版 ECDH/ECDSA 模块判断 TLS 1.2
+是否需要 ECC 扩展，遗漏 PSA 后端。应用构建补充 `MBEDTLS_SSL_TLS1_2_SOME_ECC`
+兼容定义，使 ClientHello 声明 `supported_groups`；不改共享 SDK 或切换加密后端。
+接收端会打印 OpenSSL 的握手失败原因码，不打印 URL、凭据或录音内容。
 
 `hardware_probe.py`（另需 `pyserial`）可上传指定会话的片段 1，采集系统堆与
 线程栈，并将接收文件与已有下载参考文件逐字节比较；参数见 `--help`。

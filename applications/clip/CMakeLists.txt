@@ -37,6 +37,14 @@ if(CONFIG_CLIP_HTTPS_POC)
     # NCS nrf-config.h does not expose Zephyr's HAVE_TIME_DATE Kconfig option.
     # Apply to the entire application image including its TLS/X.509 libraries.
     zephyr_compile_definitions(MBEDTLS_HAVE_TIME MBEDTLS_HAVE_TIME_DATE MBEDTLS_PLATFORM_MS_TIME_ALT)
+    # This SDK's config_adjust_ssl.h detects TLS 1.2 ECC only through the
+    # legacy ECDH/ECDSA modules. With PSA-only crypto it omits supported_groups
+    # from ClientHello, causing OpenSSL to reject otherwise shared ECDHE suites.
+    # Keep the compatibility definition app-only and retain the PSA backend.
+    if(CONFIG_MBEDTLS_USE_PSA_CRYPTO AND CONFIG_PSA_WANT_ALG_ECDH
+       AND CONFIG_MBEDTLS_SSL_PROTO_TLS1_2)
+        zephyr_compile_definitions("MBEDTLS_SSL_TLS1_2_SOME_ECC=")
+    endif()
     # Hostap selects MBEDTLS_ENABLE_HEAP unconditionally in this NCS version.
     # Replace only this image's initializer, at the SDK's original init priority;
     # leave the shared SDK and its public calloc/free API unchanged.

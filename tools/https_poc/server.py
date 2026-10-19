@@ -39,6 +39,11 @@ class Handler(BaseHTTPRequestHandler):
         if isinstance(self.connection, ssl.SSLSocket):
             try:
                 self.connection.do_handshake()
+            except ssl.SSLError as error:
+                # OpenSSL reason codes contain no request data or credentials.
+                print(json.dumps({"event": "tls_handshake_failed",
+                                  "reason": error.reason}), flush=True)
+                return
             except OSError:
                 return
         super().handle()
