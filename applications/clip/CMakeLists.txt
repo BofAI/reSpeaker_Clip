@@ -6,6 +6,7 @@ find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(clip)
 
 target_sources_ifdef(CONFIG_CLIP_RESOURCE_STATS app PRIVATE src/resource_stats.c)
+target_sources_ifdef(CONFIG_CLIP_WIFI_DIAG app PRIVATE src/wifi_diag.c)
 
 # Include directories
 target_include_directories(app PRIVATE include)

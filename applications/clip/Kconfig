@@ -456,4 +456,13 @@ config CLIP_DEBUG_STATS
 	help
 	  Print thread stack usage and heap stats every 10 seconds.
 
+config CLIP_WIFI_DIAG
+	bool "Passive HTTPS station network diagnostics"
+	depends on CLIP_HTTPS_POC && NET_STATISTICS_USER_API
+	depends on NET_STATISTICS_PER_INTERFACE && NET_STATISTICS_IPV4 && NET_STATISTICS_TCP
+	default n
+	help
+	  Cache software network counters around station setup and TLS connect.
+	  USB NETDIAG reads only the cache; no hardware statistics RPC is used.
+
 endif # CLIP

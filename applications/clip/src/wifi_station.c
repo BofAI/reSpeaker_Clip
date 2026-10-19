@@ -12,6 +12,7 @@
 #include <string.h>
 #include "wifi.h"
 #include "https_poc.h"
+#include "wifi_diag.h"
 #include "config.h"
 
 static K_SEM_DEFINE(ready_sem, 0, 1);
@@ -126,6 +127,7 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
     key = k_spin_lock(&network_lock);
     last_network = network;
     k_spin_unlock(&network_lock, key);
+    wifi_diag_capture(WIFI_DIAG_DHCP, 0);
 #ifdef CONFIG_NRF70_SR_COEX
     /* Match the existing AP path: configure only after the radio is running. */
     bool separate = IS_ENABLED(CONFIG_COEX_SEP_ANTENNAS);
@@ -137,7 +139,10 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
         ret = nrf_wifi_coex_config_pta(NRF_WIFI_PTA_WLAN_OP_BAND_2_4_GHZ,
                                      separate, ble);
     }
+    wifi_diag_capture(WIFI_DIAG_COEX, ret);
     if (ret) { return ret; }
+#else
+    wifi_diag_capture(WIFI_DIAG_COEX, 0);
 #endif
     atomic_set(&last_step, STA_CONNECTED);
     return 0;

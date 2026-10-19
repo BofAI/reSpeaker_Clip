@@ -13,6 +13,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "https_poc.h"
+#include "wifi_diag.h"
 #include "at_server.h"
 #include "transport.h"
 #include "storage.h"
@@ -108,6 +109,7 @@ bool https_poc_command_allowed(const char *name)
 {
     /* Read-only instrumentation must remain available during TLS/upload. */
     if (!strcmp(name, "RES")) { return true; }
+    if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETDIAG")) { return true; }
     /* A deliberately small control surface also excludes deferred erase/reboot
      * commands which could outlive the AT handler and race a subsequent job. */
     if (https_poc_active()) {
@@ -312,8 +314,10 @@ static int tls_connect(void)
      * not prove the TLS handshake completed). Keep within the job deadline. */
     if (deadline - k_uptime_get() < CONNECT_BUDGET_MS) { ret = -ETIMEDOUT; goto out; }
     atomic_set(&tls_step, TLS_SETUP_HANDSHAKE);
+    wifi_diag_capture(WIFI_DIAG_CONNECT_BEGIN, 0);
     ret = zsock_connect(sock, address->ai_addr, address->ai_addrlen);
     if (ret < 0) { ret = -errno; }
+    wifi_diag_capture(WIFI_DIAG_CONNECT_END, ret);
     int cancel_ret = check_cancel();
     if (cancel_ret) { ret = cancel_ret; }
 out:
@@ -425,6 +429,7 @@ static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
         atomic_clear(&cancelled); atomic_clear(&stalled);
         atomic_clear(&last_error); atomic_clear(&bytes_sent);
         atomic_set(&stage, PREPARING);
+        wifi_diag_reset();
         k_sem_give(&start_job);
     } else { ret = -ENOTSUP; }
     memset(args, 0, sizeof(args));
@@ -453,5 +458,5 @@ int https_poc_register(void)
         ret = at_server_register_cmd(&commands[i]);
         if (ret) { return ret; }
     }
-    return 0;
+    return wifi_diag_register();
 }

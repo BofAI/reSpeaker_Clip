@@ -93,6 +93,11 @@ def run(args):
                     result = {"attempt": attempt+1, "status": status,
                               "elapsed_s": time.monotonic()-started,
                               "after_resources": resource}
+                    if getattr(args, "netdiag", False):
+                        points = [query(f"AT+NETDIAG={index}") for index in range(4)]
+                        if any(not point.get("ok") for point in points):
+                            raise RuntimeError("Network diagnostic query failed")
+                        result["netdiag"] = [point["data"] for point in points]
                     if status["stage"] == "succeeded":
                         actual = target.read_bytes()
                         if actual != reference:
@@ -130,6 +135,8 @@ def main():
     parser.add_argument("--received", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--repeat", type=int, default=1)
+    parser.add_argument("--netdiag", action="store_true",
+                        help="collect cached network snapshots from a netdiag image")
     args = parser.parse_args()
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be 1..100")

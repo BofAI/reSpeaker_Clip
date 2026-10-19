@@ -71,6 +71,7 @@ int main(void) {
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             code = '#include <stdbool.h>\n#include <string.h>\n#include <assert.h>\n'
+            code += '#define CONFIG_CLIP_WIFI_DIAG 1\n#define IS_ENABLED(x) (x)\n'
             code += 'static bool busy;\nstatic bool https_poc_active(void) {return busy;}\n'
             code += 'bool https_poc_command_allowed' + policy
             code += '''
@@ -78,6 +79,7 @@ int main(void) {
     for (int state=0; state<2; state++) {
         busy=state;
         assert(https_poc_command_allowed("RES"));
+        assert(https_poc_command_allowed("NETDIAG"));
         assert(https_poc_command_allowed("GSTAT"));
         assert(!https_poc_command_allowed("PAIR"));
         assert(!https_poc_command_allowed("DELETE"));
