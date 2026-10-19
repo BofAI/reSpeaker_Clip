@@ -76,6 +76,24 @@ and the AP before starting another test. A timed-out command may have succeeded.
 Device measurements and the observed AP-start failure after enhanced recording
 are documented in `docs/runtime-resources-0.1.2-results.md`.
 
+For controlled AP-start diagnosis on the same image:
+
+```sh
+python3 tools/runtime_resources/ap_controls.py --address DEVICE_UUID \
+  --output /tmp/clip-ap-controls --record-seconds 15
+```
+
+Each arm starts with a reboot: fresh boot, normal recording, enhanced recording,
+and enhanced recording followed by a short normal recording. The last arm uses
+the existing normal-mode start path to release the SpeexDSP instance and
+reinitialize Opus when its parameters change. It does
+not change firmware, download files or erase sessions. Each command's response
+and latency plus heap snapshots are recorded. AP startup allows 60 seconds.
+On successful completion the device is rebooted back to idle, with the original
+recording mode, AP/USB/log off. On a timeout, inspect state after reconnecting
+before running another experiment. These controls are not a baseline-firmware
+A/B test and cannot identify an individual failed allocation by themselves.
+
 CPU is scheduler busy time divided by busy plus idle time over an interval,
 in basis points (10000 = 100%). It depends on the SDK's cycle accounting and
 is not a per-interrupt profiler. The first query, subsecond intervals and
