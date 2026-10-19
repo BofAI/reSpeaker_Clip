@@ -1,5 +1,11 @@
 # reSpeaker Clip - BLE AT Protocol Specification
 
+> The optional `CLIP_HTTPS_POC` measurement build uses Wi-Fi Station and USB
+> CDC only (no AP or USB disk). Its USB-only configuration/upload commands
+> and restrictions are documented in [HTTPS experiment](../tools/https_poc/README.md).
+> Read-only `AT+RES` and thread stack queries remain available during uploads
+> when `CLIP_RESOURCE_STATS` is enabled. This is an experimental build profile.
+
 ## 1. Protocol Overview
 
 ### 1.1 Design Principles

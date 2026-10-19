@@ -11,6 +11,8 @@ def main():
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--ca", type=Path, required=True)
+    parser.add_argument("--extra-conf", type=Path, action="append", default=[],
+                        help="additional app-only config, appended after https.conf")
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[2]
     ca = args.ca.resolve()
@@ -22,10 +24,13 @@ def main():
         parser.error("refusing to overwrite the baseline build")
     env = dict(os.environ, ZEPHYR_EXTRA_MODULES=str(repo),
                ZEPHYR_SDK_INSTALL_DIR=str(args.sdk.resolve()), CLIP_HTTPS_CA_FILE=str(ca))
+    configs = [repo / "applications/clip/https.conf", *[p.resolve() for p in args.extra_conf]]
+    if any(not p.is_file() for p in configs):
+        parser.error("each --extra-conf must be an existing file")
     command = ["west", "build", "--cmake", "--sysbuild", "-b", "clip/nrf5340/cpuapp",
                str(repo / "applications/clip"), "-d", str(build), "--",
                "-DSNIPPET=production", "-DSNIPPET_ROOT=" + str(repo / "applications/clip"),
-               "-Dclip_EXTRA_CONF_FILE=" + str(repo / "applications/clip/https.conf")]
+               "-Dclip_EXTRA_CONF_FILE=" + ";".join(map(str, configs))]
     build.parent.mkdir(parents=True, exist_ok=True)
     log = build.parent / (build.name + ".log")
     with log.open("w") as output:

@@ -4,8 +4,8 @@
 
 ## 当前边界
 
-- 无样机：电脑端协议测试与固件编译不代表设备验收通过。
-- 继承 `55ef94c` 外置 Wi-Fi 补丁方案。刷机前必须完成补丁写入、回读和 LittleFS 分区迁移；不能只刷应用包。
+- 当前整合分支为 `experiment/https-runtime-0.1.2`，保留音频停止释放修复及运行时测量；电脑端协议测试与固件编译不代表设备 HTTPS 验收通过。
+- 使用已验证的外置 Wi-Fi 补丁布局；当前测试设备已完成备份、迁移和回读。其他未迁移设备仍须先完成这些步骤，不能只刷应用包。
 - BLE 保留；实验构建替换 AP 为 Station，USB 仅 CDC，不暴露录音磁盘。应用运行期间禁用 OTA 和非必要 AT 命令，bootloader 恢复入口不在本次修改范围。
 - 只允许空闲时上传，上传期间不能录音或操作其他文件传输。最多 8 MiB，保留本地文件，不改变原手机同步标记。
 - Wi-Fi 密码和令牌仅存在 RAM。CA 公钥编入固件；证书链、域名和有效期验证开启。USB 注入当前时间，重启须重新配置。
@@ -59,9 +59,13 @@ python /home/ubuntu/firmware/reSpeaker_Clip-https/tools/https_poc/build.py \
 
 `build.py` 仅构建，不刷机。应用配置为 `https.conf`，不把 TLS 配置施加到 MCUboot／网络核。完整输出为构建目录旁的 `.log`。
 
-## 4. 样机到货后的控制方式
+测量构建在上述命令后追加 `--extra-conf /absolute/source/applications/clip/runtime.conf`。
+`AT+RES` 查询系统堆和 CPU，`AT+RES=线程序号` 查询栈高水位；上传期间也可查询。
+静态 RAM 包含堆栈预留，不能与运行时分配相加；系统堆统计也不覆盖所有独立内存池。
 
-先完成外置补丁启动验证，再连接 USB CDC。建立权限为 `0600` 的私有 JSON 配置，字段为 `ssid`、`password`、`host`、`port`、`device`、`token`。`host` 必须与证书 DNS 名称一致，`device` 与接收端一致。SSID 不支持逗号；首版只支持 2.4 GHz WPA2-Personal。
+## 4. USB 控制方式
+
+先完成外置补丁启动验证，再连接 USB CDC。建立权限为 `0600` 的私有 JSON 配置，字段为 `ssid`、`password`、`host`、`port`、`device`、`token`。`host` 必须与证书中的 DNS 名称或 IP 地址一致，`device` 与接收端一致。`make_credentials.py --hostname` 接受 DNS 名称或 IPv4 地址，并生成对应 SAN 类型；局域网 IP 改变时需重新生成证书并构建。SSID 不支持逗号；首版只支持 2.4 GHz WPA2-Personal。
 
 ```sh
 python3 tools/https_poc/device.py --port /dev/cu.usbmodemXXXX --config /private/path/clip-test.json

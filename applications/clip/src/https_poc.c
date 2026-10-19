@@ -97,6 +97,8 @@ bool https_poc_active(void) { return atomic_get(&active); }
 
 bool https_poc_command_allowed(const char *name)
 {
+    /* Read-only instrumentation must remain available during TLS/upload. */
+    if (!strcmp(name, "RES")) { return true; }
     /* A deliberately small control surface also excludes deferred erase/reboot
      * commands which could outlive the AT handler and race a subsequent job. */
     if (https_poc_active()) {

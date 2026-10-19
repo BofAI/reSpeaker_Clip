@@ -1,5 +1,13 @@
 # reSpeaker Clip SDK
 
+> Experimental HTTPS profile: `experiment/https-runtime-0.1.2` replaces the AP
+> with Station mode and disables the USB disk. Use the dedicated
+> [USB HTTPS tools](../tools/https_poc/README.md) for credentials and upload
+> control; the SDK does not provide those experimental commands as high-level
+> methods. `AT+RES` remains available over BLE for resource measurements when
+> enabled, including while an upload is active. Standard AP/UDP workflows below
+> apply to the normal firmware profile.
+
 The new Python SDK for the current reSpeaker Clip firmware.  It is intentionally
 independent from `applications/clip/tests`: that directory remains the legacy
 test/tool collection and is neither imported nor modified by this package.
