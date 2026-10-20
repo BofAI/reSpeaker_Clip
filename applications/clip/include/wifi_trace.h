@@ -10,6 +10,11 @@ struct wifi_trace_stats {
     uint32_t rx_peer, rx_valid, arp_input, arp_accept, arp_pending, arp_no_pending;
     uint32_t arp_release, arp_release_error, tx_syn, tx_syn_error, tx_arp, tx_arp_error;
     uint32_t rx_ms, syn_ms;
+    /* Per connection, reset by wifi_trace_peer(). Bits 0..3 indicate first
+     * ARP TX, second ARP TX, first valid ARP RX, first SYN TX. TX is driver
+     * handoff, not proof of transmission/ACK on the wireless medium. */
+    uint32_t timeline_valid, arp_first_ms, arp_second_ms, arp_last_ms;
+    uint32_t rx_first_ms, syn_first_ms;
     int release_result, syn_result;
 };
 enum wifi_trace_event {

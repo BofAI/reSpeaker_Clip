@@ -12,8 +12,13 @@ static atomic_t peer_ip, local_ip;
 
 void wifi_trace_peer(uint32_t peer, uint32_t local)
 {
+    k_spinlock_key_t key = k_spin_lock(&lock);
+    stats.timeline_valid = 0;
+    stats.arp_first_ms = stats.arp_second_ms = stats.arp_last_ms = 0;
+    stats.rx_first_ms = stats.syn_first_ms = 0;
     atomic_set(&local_ip, local);
     atomic_set(&peer_ip, peer);
+    k_spin_unlock(&lock, key);
 }
 
 void wifi_trace_get(struct wifi_trace_stats *out)
@@ -69,7 +74,13 @@ void wifi_trace_rx(struct net_if *iface, struct net_pkt *pkt)
                  target == (uint32_t)atomic_get(&local_ip);
     k_spinlock_key_t key = k_spin_lock(&lock);
     stats.rx_peer++; stats.rx_ms = k_uptime_get_32();
-    if (valid) { stats.rx_valid++; }
+    if (valid) {
+        stats.rx_valid++;
+        if (!(stats.timeline_valid & 4)) {
+            stats.rx_first_ms = stats.rx_ms;
+            stats.timeline_valid |= 4;
+        }
+    }
     k_spin_unlock(&lock, key);
 }
 
@@ -79,8 +90,9 @@ int wifi_trace_tx_begin(struct net_if *iface, struct net_pkt *pkt)
     uint8_t h[42], flags;
     size_t n = net_buf_linearize(h, sizeof(h), pkt->buffer, 0, sizeof(h));
     int kind = 0;
-    if (n >= 42 && h[12] == 8 && h[13] == 6 && peer_matches(h + 38)) {
-        kind = 1; /* ARP directed to the configured receiver. */
+    if (n >= 42 && h[12] == 8 && h[13] == 6 && h[20] == 0 && h[21] == 1 &&
+        peer_matches(h + 38)) {
+        kind = 1; /* ARP request directed to the configured receiver. */
     } else if (n >= 34 && h[12] == 8 && h[13] == 0 && (h[14] >> 4) == 4 &&
                (h[14] & 15) >= 5 && h[23] == 6 && !(h[20] & 0x1f) && !h[21] &&
                peer_matches(h + 30) &&
@@ -90,8 +102,25 @@ int wifi_trace_tx_begin(struct net_if *iface, struct net_pkt *pkt)
     }
     if (kind) {
         k_spinlock_key_t key = k_spin_lock(&lock);
-        if (kind == 1) { stats.tx_arp++; }
-        else { stats.tx_syn++; stats.syn_ms = k_uptime_get_32(); }
+        uint32_t now = k_uptime_get_32();
+        if (kind == 1) {
+            stats.tx_arp++;
+            stats.arp_last_ms = now;
+            if (!(stats.timeline_valid & 1)) {
+                stats.arp_first_ms = now;
+                stats.timeline_valid |= 1;
+            } else if (!(stats.timeline_valid & 2)) {
+                stats.arp_second_ms = now;
+                stats.timeline_valid |= 2;
+            }
+        } else {
+            stats.tx_syn++;
+            stats.syn_ms = now;
+            if (!(stats.timeline_valid & 8)) {
+                stats.syn_first_ms = now;
+                stats.timeline_valid |= 8;
+            }
+        }
         k_spin_unlock(&lock, key);
     }
     return kind;

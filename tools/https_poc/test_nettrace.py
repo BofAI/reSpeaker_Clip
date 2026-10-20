@@ -50,7 +50,8 @@ struct k_spinlock { int unused; };
 typedef int k_spinlock_key_t;
 static int k_spin_lock(struct k_spinlock *l) { (void)l; return 0; }
 static void k_spin_unlock(struct k_spinlock *l, int k) { (void)l; (void)k; }
-static uint32_t k_uptime_get_32(void) { return 123; }
+static uint32_t now=123;
+static uint32_t k_uptime_get_32(void) { return now; }
 struct net_linkaddr { uint8_t *addr; uint8_t len; };
 struct net_if { struct net_linkaddr link; };
 static uint8_t own_mac[6]={2,3,4,5,6,7};
@@ -84,6 +85,7 @@ int main(void) {
     wifi_trace_rx(&wifi,&pkt);wifi_trace_rx(&other,&pkt);
     struct wifi_trace_stats s;wifi_trace_get(&s);
     assert(s.rx_peer==1 && s.rx_valid==1 && s.rx_ms==123);
+    assert(s.timeline_valid==4 && s.rx_first_ms==123);
     assert(pkt.cursor==9 && memcmp(before,raw,96)==0);
     raw[38]^=1;wifi_trace_rx(&wifi,&pkt);raw[38]^=1;
     tail.len=24;wifi_trace_rx(&wifi,&pkt);tail.len=25;
@@ -105,6 +107,33 @@ int main(void) {
     assert(s.tx_syn==1 && s.tx_syn_error==1 && s.syn_result==-105 && s.syn_ms==123);
     raw[14+60+13]=0x12;assert(wifi_trace_tx_begin(&wifi,&pkt)==0);
     raw[14+60+13]=2;raw[21]=1;assert(wifi_trace_tx_begin(&wifi,&pkt)==0);
+    /* Connection timeline resets without destroying cumulative counters.
+     * Zero and uptime wrap are valid timestamps, not missing samples. */
+    wifi_trace_peer(p,l);wifi_trace_get(&s);
+    assert(s.timeline_valid==0 && s.rx_first_ms==0 && s.rx_valid==1);
+    memset(raw,0,sizeof(raw));raw[12]=8;raw[13]=6;raw[21]=1;
+    memcpy(raw+38,peer,4);now=0;
+    assert(wifi_trace_tx_begin(&wifi,&pkt)==1);
+    wifi_trace_tx_end(1,-12);
+    now=3000;assert(wifi_trace_tx_begin(&wifi,&pkt)==1);
+    now=6000;assert(wifi_trace_tx_begin(&wifi,&pkt)==1);
+    raw[21]=2;assert(wifi_trace_tx_begin(&wifi,&pkt)==0); /* No ARP replies. */
+    wifi_trace_get(&s);
+    assert(s.timeline_valid==3 && s.arp_first_ms==0 && s.arp_second_ms==3000);
+    assert(s.arp_last_ms==6000 && s.tx_arp==3 && s.tx_arp_error==1);
+    memcpy(raw,own_mac,6);raw[15]=1;raw[16]=8;raw[18]=6;raw[19]=4;
+    memcpy(raw+28,peer,4);memcpy(raw+32,own_mac,6);memcpy(raw+38,local,4);
+    now=6100;wifi_trace_rx(&wifi,&pkt);
+    now=6200;wifi_trace_rx(&wifi,&pkt);wifi_trace_get(&s);
+    assert(s.timeline_valid==7 && s.rx_first_ms==6100 && s.rx_ms==6200);
+    memset(raw,0,sizeof(raw));raw[12]=8;raw[14]=0x45;raw[23]=6;
+    memcpy(raw+30,peer,4);raw[14+20+13]=2;
+    now=UINT32_MAX;assert(wifi_trace_tx_begin(&wifi,&pkt)==2);
+    now=9;assert(wifi_trace_tx_begin(&wifi,&pkt)==2);wifi_trace_get(&s);
+    assert(s.timeline_valid==15 && s.syn_first_ms==UINT32_MAX && s.syn_ms==9);
+    wifi_trace_peer(p,l);wifi_trace_get(&s);
+    assert(s.timeline_valid==0 && s.arp_first_ms==0 && s.arp_second_ms==0);
+    assert(s.arp_last_ms==0 && s.syn_first_ms==0 && s.tx_arp==3);
     assert(pkt.cursor==9);
     return 0;
 }

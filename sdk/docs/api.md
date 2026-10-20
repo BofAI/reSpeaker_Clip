@@ -71,3 +71,12 @@ water. Both return the raw `data` dictionary; stock firmware raises
 `CommandError`. See `docs/protocol.md` in the firmware repository for units,
 counter lifetime and measurement limitations. CPU requires queries separated
 by at least one second; `cpu_bp=-1` means unavailable.
+
+## Experimental firmware diagnostics
+
+`CLIP_WIFI_DIAG` builds provide USB-only cached `AT+NETDIAG=0..3` and
+`AT+NETTRACE=0..3`. These are engineering commands outside the SDK's normal
+recording API. For schema 2 timeline fields and validity bits, see
+[the firmware protocol](../../docs/protocol.md#optional-passive-wi-fi-diagnostics-clip_wifi_diag).
+Readers must preserve zero timestamps and compute uint32 timestamp differences
+modulo 2^32. Driver handoff timestamps do not prove delivery over Wi-Fi.

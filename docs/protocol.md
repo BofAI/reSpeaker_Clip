@@ -2808,3 +2808,21 @@ Indexes may change across queries; identify threads by ID and name. Each
 request scans only one stack with the thread monitor lock held. No settings
 or workloads are changed by either form. See `tools/runtime_resources` for
 measurement limitations and collection instructions.
+
+## Optional passive Wi-Fi diagnostics (`CLIP_WIFI_DIAG`)
+
+Instrumented builds expose USB-only `AT+NETDIAG=0..3` and `AT+NETTRACE=0..3`.
+These read cached snapshots at DHCP, coexistence setup, connection begin and
+connection end respectively; reading them does not query the radio. `job`
+changes at each upload and `valid=false` means that point was not reached.
+
+`NETTRACE` schema 2 retains the cumulative counters and adds a per-connection
+timeline reset before socket connection. `timeline_valid` bits 0, 1, 2 and 3
+indicate `arp_first_ms`, `arp_second_ms`, `rx_first_ms` and `syn_first_ms`.
+`arp_last_ms` is valid with bit 0. ARP TX counts only requests to the peer;
+`rx_first_ms` records the first peer reply passing the existing address checks.
+All timestamps are uint32 uptime milliseconds; zero is valid, and differences
+must use unsigned subtraction across wrap. TX timestamps mark driver handoff,
+not wireless delivery or acknowledgement. Existing `rx_ms` and `syn_ms` retain
+their last-observation meaning. Captures remain approximate concurrent software
+observations, and do not contain radio statistics or packet payloads.

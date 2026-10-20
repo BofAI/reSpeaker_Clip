@@ -87,6 +87,10 @@ int main(void) {
     ctx.name="NETTRACE";
     assert(diagnostic(&ctx,out,sizeof(out)) > 0);
     assert(strstr(out,"\"rx_peer\":4294967295") && strstr(out,"\"syn_result\":-1"));
+    assert(strstr(out,"\"schema\":2") && strstr(out,"\"arp_first_ms\":4294967295"));
+    char trace_small[8];
+    assert(diagnostic(&ctx,trace_small,sizeof(trace_small)) == -AT_ERR_NOMEM);
+    assert(trace_small[0] == 0);
     ctx.name="NETDIAG";
     char small[8];
     assert(diagnostic(&ctx,small,sizeof(small)) == -AT_ERR_NOMEM && small[0] == 0);

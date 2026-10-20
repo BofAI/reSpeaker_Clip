@@ -83,17 +83,21 @@ static int diagnostic(struct at_cmd_ctx *ctx, char *out, size_t size)
     if (!strcmp(ctx->name, "NETTRACE")) {
         const struct wifi_trace_stats *t = &s.trace;
         int n = snprintf(out, size,
-            "{\"ok\":true,\"data\":{\"schema\":1,\"job\":%u,\"point\":%u,\"valid\":%s,\"ms\":%u,"
+            "{\"ok\":true,\"data\":{\"schema\":2,\"job\":%u,\"point\":%u,\"valid\":%s,\"ms\":%u,"
             "\"driver_rx\":%u,\"driver_nomem\":%u,\"driver_reject\":%u,\"rx_peer\":%u,\"rx_valid\":%u,"
             "\"arp_input\":%u,\"arp_accept\":%u,\"arp_pending\":%u,\"arp_no_pending\":%u,"
             "\"arp_release\":%u,\"arp_release_error\":%u,\"tx_syn\":%u,\"tx_syn_error\":%u,"
             "\"tx_arp\":%u,\"tx_arp_error\":%u,\"rx_ms\":%u,\"syn_ms\":%u,"
+            "\"timeline_valid\":%u,\"arp_first_ms\":%u,\"arp_second_ms\":%u,\"arp_last_ms\":%u,"
+            "\"rx_first_ms\":%u,\"syn_first_ms\":%u,"
             "\"release_result\":%d,\"syn_result\":%d}}\n",
             job, point, s.valid ? "true" : "false", s.ms,
             t->driver_rx, t->driver_nomem, t->driver_reject, t->rx_peer, t->rx_valid,
             t->arp_input, t->arp_accept, t->arp_pending, t->arp_no_pending,
             t->arp_release, t->arp_release_error, t->tx_syn, t->tx_syn_error,
-            t->tx_arp, t->tx_arp_error, t->rx_ms, t->syn_ms, t->release_result, t->syn_result);
+            t->tx_arp, t->tx_arp_error, t->rx_ms, t->syn_ms,
+            t->timeline_valid, t->arp_first_ms, t->arp_second_ms, t->arp_last_ms,
+            t->rx_first_ms, t->syn_first_ms, t->release_result, t->syn_result);
         if (n < 0 || (size_t)n >= size) { if (size) { out[0] = 0; } return -AT_ERR_NOMEM; }
         return n;
     }
