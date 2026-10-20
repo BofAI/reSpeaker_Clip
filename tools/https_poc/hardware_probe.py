@@ -103,6 +103,11 @@ def run(args):
                         if any(not point.get("ok") for point in points):
                             raise RuntimeError("Network trace query failed")
                         result["nettrace"] = [point["data"] for point in points]
+                    if getattr(args, "nettx", False):
+                        points = [query(f"AT+NETTX={index}") for index in range(3)]
+                        if any(not point.get("ok") for point in points):
+                            raise RuntimeError("Firmware TX diagnostic query failed")
+                        result["nettx"] = [point["data"] for point in points]
                     if status["stage"] == "succeeded":
                         actual = target.read_bytes()
                         if actual != reference:
@@ -144,6 +149,8 @@ def main():
                         help="collect cached network snapshots from a netdiag image")
     parser.add_argument("--nettrace", action="store_true",
                         help="collect cached ARP/driver snapshots from an instrumented image")
+    parser.add_argument("--nettx", action="store_true",
+                        help="collect the first three cached ARP firmware-command records")
     args = parser.parse_args()
     if not 1 <= args.repeat <= 100:
         parser.error("--repeat must be 1..100")

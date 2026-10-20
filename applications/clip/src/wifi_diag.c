@@ -9,6 +9,7 @@
 #include "transport.h"
 #include "wifi_diag.h"
 #include "wifi_trace.h"
+#include "wifi_tx_trace.h"
 
 struct snapshot {
     struct wifi_trace_stats trace;
@@ -36,7 +37,9 @@ void wifi_diag_reset(void)
     k_spinlock_key_t key = k_spin_lock(&sample_lock);
     memset(samples, 0, sizeof(samples));
     generation++;
+    uint32_t job = generation;
     k_spin_unlock(&sample_lock, key);
+    wifi_tx_trace_reset(job);
 }
 
 void wifi_diag_capture(enum wifi_diag_point point, int result)
@@ -71,11 +74,37 @@ void wifi_diag_capture(enum wifi_diag_point point, int result)
 
 static int diagnostic(struct at_cmd_ctx *ctx, char *out, size_t size)
 {
+    bool tx = !strcmp(ctx->name, "NETTX");
+    int limit = tx ? WIFI_TX_TRACE_SLOTS : WIFI_DIAG_POINTS;
     if (ctx->transport_type != TRANSPORT_TYPE_USB || !ctx->args ||
-        ctx->args[0] < '0' || ctx->args[0] >= '0' + WIFI_DIAG_POINTS || ctx->args[1]) {
-        return snprintf(out, size, "{\"ok\":false,\"msg\":\"USB NETDIAG=0..3 required\"}\n");
+        ctx->args[0] < '0' || ctx->args[0] >= '0' + limit || ctx->args[1]) {
+        return snprintf(out, size, "{\"ok\":false,\"msg\":\"USB diagnostic index required\"}\n");
     }
     unsigned int point = ctx->args[0] - '0';
+    if (tx) {
+        struct wifi_tx_trace r;
+        uint32_t job, total;
+        char phy_tx[13], phy_ack[13];
+        static const char hex[] = "0123456789abcdef";
+        wifi_tx_trace_get(point, &r, &job, &total);
+        for (unsigned int i = 0; i < 6; i++) {
+            phy_tx[i * 2] = hex[r.phy_tx[i] >> 4];
+            phy_tx[i * 2 + 1] = hex[r.phy_tx[i] & 15];
+            phy_ack[i * 2] = hex[r.phy_ack[i] >> 4];
+            phy_ack[i * 2 + 1] = hex[r.phy_ack[i] & 15];
+        }
+        phy_tx[12] = phy_ack[12] = 0;
+        int n = snprintf(out, size,
+            "{\"ok\":true,\"data\":{\"schema\":1,\"job\":%u,\"slot\":%u,\"total\":%u,"
+            "\"valid\":%s,\"flags\":%u,\"descriptor\":%u,\"frame\":%u,"
+            "\"prepared_ms\":%u,\"submit_ms\":%u,\"submit_result\":%d,\"done_ms\":%u,"
+            "\"status\":%u,\"status_count\":%u,\"phy_tx\":\"%s\",\"phy_ack\":\"%s\"}}\n",
+            job, point, total, r.flags & WIFI_TX_PREPARED ? "true" : "false",
+            r.flags, r.descriptor, r.frame, r.prepared_ms, r.submit_ms,
+            r.submit_result, r.done_ms, r.status, r.status_count, phy_tx, phy_ack);
+        if (n < 0 || (size_t)n >= size) { if (size) { out[0] = 0; } return -AT_ERR_NOMEM; }
+        return n;
+    }
     k_spinlock_key_t key = k_spin_lock(&sample_lock);
     struct snapshot s = samples[point];
     unsigned int job = generation;
@@ -117,8 +146,10 @@ int wifi_diag_register(void)
 {
     static const struct at_command command = {"NETDIAG", AT_CMD_SET, diagnostic};
     static const struct at_command trace = {"NETTRACE", AT_CMD_SET, diagnostic};
+    static const struct at_command tx = {"NETTX", AT_CMD_SET, diagnostic};
     int ret = at_server_register_cmd(&command);
     if (!ret) { ret = at_server_register_cmd(&trace); }
+    if (!ret) { ret = at_server_register_cmd(&tx); }
     if (!ret) { net_if_register_link_cb(&link_callback, link_done); }
     return ret;
 }

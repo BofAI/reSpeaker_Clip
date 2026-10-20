@@ -80,3 +80,9 @@ recording API. For schema 2 timeline fields and validity bits, see
 [the firmware protocol](../../docs/protocol.md#optional-passive-wi-fi-diagnostics-clip_wifi_diag).
 Readers must preserve zero timestamps and compute uint32 timestamp differences
 modulo 2^32. Driver handoff timestamps do not prove delivery over Wi-Fi.
+
+`AT+NETTX=0..2` additionally reads the first three ARP firmware-command records.
+Use `flags` to distinguish preparation, HAL acceptance, completion, and available
+per-frame status; an unavailable status is not a transmit failure. PHY timestamp
+strings are opaque. The USB engineering collector supports `--nettx`; the
+normal SDK recording API is unchanged.

@@ -32,6 +32,86 @@ class NetworkTraceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             instrument_network.replace_once("needle needle", "needle", "hook")
 
+    def test_fmac_generator_expression_preserves_condition(self):
+        cmake = (ROOT / "applications/clip/wifi-trace.cmake").read_text()
+        start = cmake.index("function(clip_trace_source ")
+        function = cmake[start:cmake.index("endfunction()", start) + len("endfunction()")]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            zephyr = root / "sdk/zephyr"
+            original = root / "sdk/modules/lib/nrf_wifi/fw_if/umac_if/src/system/tx.c"
+            generated = root / "generated/fmac_tx.c"
+            zephyr.mkdir(parents=True)
+            original.parent.mkdir(parents=True)
+            generated.parent.mkdir()
+            original.write_text("int original(void) { return 1; }\n")
+            generated.write_text("int observed(void) { return 1; }\n")
+            project = f'''cmake_minimum_required(VERSION 3.20)
+project(trace_fixture C)
+set(ZEPHYR_BASE "{zephyr}")
+set(_trace_dir "{generated.parent}")
+set(CONFIG_NRF70_DATA_TX y)
+add_library(nrf-wifi-osal STATIC "$<$<BOOL:y>:{original}>")
+{function}
+clip_trace_source(nrf-wifi-osal ../modules/lib/nrf_wifi/fw_if/umac_if/src/system/tx.c fmac_tx.c)
+get_target_property(actual nrf-wifi-osal SOURCES)
+file(WRITE "${{CMAKE_BINARY_DIR}}/sources.txt" "${{actual}}")
+'''
+            (root / "CMakeLists.txt").write_text(project)
+            subprocess.run(["cmake", "-S", str(root), "-B", str(root / "build")],
+                           check=True, capture_output=True, text=True)
+            self.assertEqual((root / "build/sources.txt").read_text(),
+                             f"$<$<BOOL:y>:{generated}>")
+            self.assertEqual(original.read_text(), "int original(void) { return 1; }\n")
+
+    def test_firmware_event_status_bounds(self):
+        fixture = r"""
+#include <assert.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#define CONFIG_NRF70_MAX_TX_AGGREGATION 4
+struct __attribute__((packed)) nrf_wifi_tx_buff_done {
+    struct { uint32_t cmd,len; } umac_head;
+    uint8_t tx_desc_num,num_tx_status_code,timestamp_t1[6],timestamp_t4[6];
+    uint8_t tx_status_code[];
+};
+static int available, calls;
+static unsigned int seen_count;
+void wifi_tx_trace_done(unsigned int desc,unsigned int count,const uint8_t *status,
+                        const uint8_t *tx,const uint8_t *ack) {
+    assert(desc==2 && tx[0]==3 && ack[5]==4);
+    calls++; seen_count=count; available=status!=NULL;
+    if (status) { for (unsigned int i=0;i<count;i++) assert(status[i]==i); }
+}
+"""
+        checks = r"""
+int main(void) {
+    struct nrf_wifi_tx_buff_done *event=calloc(1,sizeof(*event)+4);
+    assert(event);event->tx_desc_num=2;event->timestamp_t1[0]=3;event->timestamp_t4[5]=4;
+    for (unsigned int i=0;i<4;i++) event->tx_status_code[i]=i;
+    event->num_tx_status_code=4;event->umac_head.len=sizeof(*event)+4;
+    clip_trace_fmac_done(event);assert(available && calls==1 && seen_count==4);
+    event->umac_head.len--;clip_trace_fmac_done(event);assert(!available);
+    event->num_tx_status_code=5;event->umac_head.len=sizeof(*event)+5;
+    clip_trace_fmac_done(event);assert(!available && seen_count==5);
+    free(event);
+    event=calloc(1,sizeof(*event));assert(event);event->tx_desc_num=2;
+    event->timestamp_t1[0]=3;event->timestamp_t4[5]=4;
+    event->num_tx_status_code=1;event->umac_head.len=sizeof(*event);
+    clip_trace_fmac_done(event);assert(!available); /* No byte beyond allocation. */
+    free(event);return 0;
+}
+"""
+        adapter = instrument_network.FMAC_DONE_ADAPTER.replace('#include "wifi_tx_trace.h"', '')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "test.c").write_text(fixture + adapter + checks)
+            subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=address,undefined", str(root / "test.c"),
+                            "-o", str(root / "test")], check=True)
+            subprocess.run([str(root / "test")], check=True)
+
     def test_header_only_fragmented_packets_and_send_errors(self):
         source = (ROOT / "applications/clip/src/wifi_trace.c").read_text()
         source = re.sub(r"^#include .*\n", "", source, flags=re.MULTILINE)
@@ -43,6 +123,7 @@ class NetworkTraceTest(unittest.TestCase):
 #include <assert.h>
 #define CONFIG_CLIP_WIFI_DIAG 1
 #include "wifi_trace.h"
+#include "wifi_tx_trace.h"
 typedef int32_t atomic_t;
 static int32_t atomic_get(atomic_t *v) { return *v; }
 static void atomic_set(atomic_t *v, uint32_t n) { *v=(int32_t)n; }
@@ -134,6 +215,49 @@ int main(void) {
     wifi_trace_peer(p,l);wifi_trace_get(&s);
     assert(s.timeline_valid==0 && s.arp_first_ms==0 && s.arp_second_ms==0);
     assert(s.arp_last_ms==0 && s.syn_first_ms==0 && s.tx_arp==3);
+    /* Firmware-command records are bounded, keyed by descriptor/frame,
+     * and distinguish failed submission, unavailable status and completion. */
+    memset(raw,0,sizeof(raw)); raw[12]=8; raw[13]=6;raw[15]=1;
+    raw[16]=8;raw[18]=6;raw[19]=4;raw[21]=1;
+    memcpy(raw+28,local,4);memcpy(raw+38,peer,4);
+    struct wifi_tx_trace tx;uint32_t job,total;
+    _Static_assert(sizeof(tx)==32,"Keep the bounded trace RAM budget");
+    wifi_tx_trace_reset(9);
+    wifi_tx_trace_prepare(2,1,raw,42);
+    wifi_tx_trace_get(0,&tx,&job,&total);assert(job==9 && total==0);
+    wifi_trace_peer(p,l);
+    wifi_tx_trace_prepare(2,1,raw,41); /* Short header. */
+    raw[28]^=1;wifi_tx_trace_prepare(2,1,raw,42);raw[28]^=1;
+    wifi_tx_trace_prepare(65536,1,raw,42);
+    now=0;wifi_tx_trace_prepare(2,1,raw,42);
+    uint8_t status[2]={1,0},phy[6]={0,1,2,3,4,5};
+    now=1;wifi_tx_trace_submit(99,0,true);
+    wifi_tx_trace_get(0,&tx,&job,&total);assert(tx.flags==WIFI_TX_PREPARED);
+    wifi_tx_trace_submit(2,0,true);
+    now=2;wifi_tx_trace_done(2,2,status,phy,phy);
+    now=3;wifi_tx_trace_done(2,2,status,phy,phy);
+    wifi_tx_trace_get(0,&tx,&job,&total);
+    assert(total==1 && tx.prepared_ms==0 && tx.submit_ms==1 && tx.done_ms==2);
+    assert(tx.status==0 && tx.status_count==2 && tx.flags==111);
+    assert(!memcmp(tx.phy_tx,phy,6));
+    now=10;wifi_tx_trace_prepare(2,0,raw,42); /* Descriptor reuse. */
+    wifi_tx_trace_submit(2,1,true);wifi_tx_trace_done(2,2,status,phy,phy);
+    wifi_tx_trace_get(1,&tx,&job,&total);
+    assert(tx.submit_result==1 && !(tx.flags&WIFI_TX_DONE));
+    now=20;wifi_tx_trace_prepare(3,3,raw,42);
+    wifi_tx_trace_done(3,2,status,NULL,NULL); /* Frame index absent. */
+    wifi_tx_trace_submit(3,0,true); /* Completion can precede return. */
+    wifi_tx_trace_get(2,&tx,&job,&total);
+    assert((tx.flags&WIFI_TX_DONE) && !(tx.flags&WIFI_TX_STATUS_VALID));
+    assert(tx.status==255 && tx.phy_tx[0]==0 && tx.status_count==2);
+    wifi_tx_trace_prepare(4,0,raw,42);wifi_tx_trace_get(3,&tx,&job,&total);
+    assert(total==4 && tx.flags==0); /* No out-of-bounds fourth slot. */
+    wifi_tx_trace_reset(10);wifi_trace_peer(p,l);
+    wifi_tx_trace_prepare(5,0,raw,42);wifi_tx_trace_submit(5,1,false);
+    wifi_tx_trace_done(5,1,status,phy,phy);wifi_tx_trace_get(0,&tx,&job,&total);
+    assert(job==10 && total==1 && tx.flags==19 && tx.submit_result==1);
+    wifi_tx_trace_reset(11);wifi_tx_trace_done(5,1,status,phy,phy);
+    wifi_tx_trace_get(0,&tx,&job,&total);assert(job==11 && total==0 && tx.flags==0);
     assert(pkt.cursor==9);
     return 0;
 }

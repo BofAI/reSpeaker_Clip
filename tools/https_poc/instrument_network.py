@@ -10,7 +10,30 @@ SOURCES = {
     "arp.c": ("subsys/net/l2/ethernet/arp.c", "0e1f28c3a4ec46b28e5406e5822e6f8f19601f4206ee71a60041930f72d4b920"),
     "ethernet.c": ("subsys/net/l2/ethernet/ethernet.c", "061b5e4ba395212ff4664bf6932c0a67d2d7c799a028758e7c3386af8616f613"),
     "net_if.c": ("drivers/wifi/nrf_wifi/src/net_if.c", "3b1633e2bb30ca947eb993513efca0f99519e5dc7e3b9cb9483be07f023ecfcb"),
+    "fmac_tx.c": ("../modules/lib/nrf_wifi/fw_if/umac_if/src/system/tx.c", "774d2bd50a88c2ef8d29b55df6c71b96c4b77e6ab104dfd0e9bc7edb47b7a4a9"),
 }
+
+
+FMAC_DONE_ADAPTER = '''#include "wifi_tx_trace.h"
+#if defined(CONFIG_NRF70_TX_DONE_WQ_ENABLED)
+#error "TX trace requires the original completion event, not the fixed-header workqueue copy"
+#endif
+/* Validate the firmware-declared length before touching its flexible array.
+ * Preserve unknown/truncated status as unavailable; always keep the fixed
+ * header completion observation. The SDK already requires this header. */
+static void clip_trace_fmac_done(const struct nrf_wifi_tx_buff_done *event)
+{
+    const uint8_t *codes = NULL;
+    unsigned int count = event->num_tx_status_code;
+    if (count <= CONFIG_NRF70_MAX_TX_AGGREGATION &&
+        event->umac_head.len >= sizeof(*event) + count) {
+        codes = event->tx_status_code;
+    }
+    wifi_tx_trace_done(event->tx_desc_num, count, codes,
+                       event->timestamp_t1, event->timestamp_t4);
+}
+
+'''
 
 
 def replace_once(text, old, new):
@@ -49,6 +72,29 @@ def transform(name, text):
         text = replace_once(text, old, old + "\n\t\twifi_trace_event(WIFI_TRACE_DRIVER_NOMEM, iface, NULL, 0);")
         old = '\t\tLOG_DBG("RCV Packet dropped by NET stack: %d", status);'
         text = replace_once(text, old, "\t\twifi_trace_event(WIFI_TRACE_DRIVER_REJECT, iface, NULL, status);\n" + old)
+    elif name == "fmac_tx.c":
+        old = "\tbuf_len = nrf_wifi_osal_nbuf_data_size((void *)nwb);\n\tphy_addr ="
+        text = replace_once(text, old,
+            "\tbuf_len = nrf_wifi_osal_nbuf_data_size((void *)nwb);\n"
+            "\twifi_tx_trace_prepare(config->tx_desc_num, frame_indx,\n"
+            "\t\t(const void *)nwb_data, buf_len);\n\tphy_addr =")
+        # Restrict both return hooks to the ordinary data command function.
+        start = text.index("enum nrf_wifi_status tx_cmd_init(")
+        stop = text.index("enum nrf_wifi_status tx_pending_process(", start)
+        block = text[start:stop]
+        old = '\t\tnrf_wifi_osal_log_err("%s: tx_cmd_prepare failed",'
+        block = replace_once(block, old,
+            "\t\twifi_tx_trace_submit(desc, status, false);\n" + old)
+        old = "\n\tnrf_wifi_osal_mem_free(umac_cmd);"
+        block = replace_once(block, old,
+            "\n\twifi_tx_trace_submit(desc, status, true);\n" + old)
+        text = text[:start] + block + text[stop:]
+        old = "\tstatus = tx_done_process(fmac_dev_ctx,\n\t\t\t\t config->tx_desc_num);"
+        text = replace_once(text, old, "\tclip_trace_fmac_done(config);\n\n" + old)
+        # SDK type declarations must precede the adapter.
+        anchor = "static enum nrf_wifi_status tx_done_process("
+        text = replace_once(text, anchor, FMAC_DONE_ADAPTER + anchor)
+        return '#include "wifi_tx_trace.h"\n' + text
     else:
         raise ValueError("Unknown SDK source")
     return '#include "wifi_trace.h"\n' + text

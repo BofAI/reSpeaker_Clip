@@ -2826,3 +2826,31 @@ must use unsigned subtraction across wrap. TX timestamps mark driver handoff,
 not wireless delivery or acknowledgement. Existing `rx_ms` and `syn_ms` retain
 their last-observation meaning. Captures remain approximate concurrent software
 observations, and do not contain radio statistics or packet payloads.
+
+`AT+NETTX=0..2` reads a bounded cache of the first three ARP requests prepared
+for the configured receiver in Wi-Fi firmware commands. `job` matches the
+upload generation, `slot` is the cache index, and `total` counts matching
+preparations including overflow beyond three slots. `valid=false` means that
+slot was not populated. The cache resets at upload start and is armed before
+socket connection; it can retain completion events after connection end.
+
+`descriptor` and `frame` identify the command descriptor and its zero-based
+frame index. `prepared_ms`, `submit_ms`, and `done_ms` use uint32 uptime.
+`flags` bits mean: 0 prepared; 1 submission returned; 2 HAL accepted;
+3 firmware completion observed; 4 command preparation failed; 5 HAL called;
+6 per-frame status available. `submit_result` is the SDK submission return,
+not a delivery result. Only bit 6 makes `status` meaningful: 0 firmware success,
+1 firmware failure, other values preserved. Missing status is 255, with bit 6
+clear. `status_count` is the event's reported frame count. Duplicate completion
+events do not overwrite the first observation; descriptor reuse does not update
+an already completed record.
+
+`phy_tx` and `phy_ack` preserve the two six-byte PHY timestamp fields as opaque
+hex strings. Their units and validity must not be assumed from nonzero values.
+Firmware success alone does not prove delivery to the AP or Mac; the ARP
+request's broadcast Ethernet destination also does not establish its 802.11
+acknowledgement policy. Compare these observations with synchronized capture.
+Only fixed-size metadata is cached; no radio queries, frame payloads, buffer
+ownership changes, or new work queues are added. This pinned diagnostic build
+requires `NRF70_TX_DONE_WQ_ENABLED=n`, because that SDK's optional work queue
+copies only the fixed event header, omitting its flexible status array.

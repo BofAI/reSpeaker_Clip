@@ -22,7 +22,13 @@ class NetdiagTest(unittest.TestCase):
 #define CONFIG_CLIP_WIFI_DIAG 1
 #include "wifi_diag.h"
 #include "wifi_trace.h"
+#include "wifi_tx_trace.h"
 void wifi_trace_get(struct wifi_trace_stats *out) { memset(out, 0xff, sizeof(*out)); }
+static uint32_t tx_job;
+void wifi_tx_trace_reset(uint32_t job) { tx_job=job; }
+void wifi_tx_trace_get(unsigned int slot, struct wifi_tx_trace *out, uint32_t *job, uint32_t *total) {
+    (void)slot; memset(out,0xff,sizeof(*out)); *job=tx_job; *total=4;
+}
 #define ARG_UNUSED(x) (void)(x)
 #define TRANSPORT_TYPE_USB 2
 #define AT_CMD_SET 1
@@ -105,6 +111,14 @@ int main(void) {
     wifi_diag_reset(); ctx.transport_type=TRANSPORT_TYPE_USB;
     diagnostic(&ctx,out,sizeof(out));
     assert(strstr(out,"\"valid\":false") && strstr(out,"\"job\":2"));
+    ctx.name="NETTX"; ctx.args="2";
+    assert(diagnostic(&ctx,out,sizeof(out)) > 0);
+    assert(strstr(out,"\"job\":2") && strstr(out,"\"total\":4"));
+    assert(strstr(out,"\"phy_tx\":\"ffffffffffff\"") && queries==1);
+    assert(diagnostic(&ctx,small,sizeof(small))==-AT_ERR_NOMEM && small[0]==0);
+    ctx.args="3"; diagnostic(&ctx,out,sizeof(out)); assert(strstr(out,"\"ok\":false"));
+    ctx.args="0"; ctx.transport_type=0;
+    diagnostic(&ctx,out,sizeof(out)); assert(strstr(out,"\"ok\":false"));
     return 0;
 }
 '''
