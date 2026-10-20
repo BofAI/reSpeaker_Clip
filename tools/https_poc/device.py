@@ -3,10 +3,42 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import select
 import termios
 import time
 import tty
+
+
+def load_config(path):
+    """Read private configuration and validate it before sending any AT commands."""
+    if path.stat().st_mode & 0o077:
+        raise ValueError("Configuration must be private (mode 0600)")
+    config = json.loads(path.read_text())
+    keys = ("ssid", "password", "host", "device", "token")
+    if not isinstance(config, dict) or any(
+            not isinstance(config.get(key), str) or
+            any(c in config[key] for c in "\r\n\0") for key in keys):
+        raise ValueError("Invalid configuration value")
+    if (not 1 <= len(config["ssid"].encode()) <= 32 or "," in config["ssid"] or
+            not 8 <= len(config["password"].encode()) <= 63 or
+            not re.fullmatch(r"[A-Za-z0-9.-]{1,95}", config["host"]) or
+            not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", config["device"]) or
+            not re.fullmatch(r"[A-Za-z0-9_-]{32,96}", config["token"])):
+        raise ValueError("Configuration does not fit the device's AT interface")
+    port = config.get("port")
+    if (isinstance(port, bool) or not isinstance(port, (int, str)) or
+            not re.fullmatch(r"[0-9]{1,5}", str(port)) or not 1 <= int(port) <= 65535):
+        raise ValueError("Port must be 1..65535")
+    config["port"] = int(port)
+    return config
+
+
+def configure_upload(query, config):
+    """Configure the upload through the caller's normal command/logging path."""
+    query(f"AT+NETCFG={config['ssid']},{config['password']}")
+    query(f"AT+UPLOADCFG={config['host']},{config['port']},{config['device']},{config['token']}")
+    query(f"AT+UPTIME={int(time.time())}")
 
 
 def exchange(fd, command):
@@ -50,6 +82,7 @@ def main():
     mode.add_argument("--upload", help="session_id:positive_segment_number")
     mode.add_argument("--cancel", action="store_true")
     args = parser.parse_args()
+    config = load_config(args.config) if args.config else None
     fd = os.open(args.port, os.O_RDWR | os.O_NOCTTY)
     old = termios.tcgetattr(fd)
     try:
@@ -58,18 +91,8 @@ def main():
         options[4] = options[5] = termios.B115200
         termios.tcsetattr(fd, termios.TCSANOW, options)
         termios.tcflush(fd, termios.TCIFLUSH)
-        if args.config:
-            if args.config.stat().st_mode & 0o077:
-                parser.error("credential file must have mode 0600")
-            cfg = json.loads(args.config.read_text())
-            for key in ("ssid", "password", "host", "device", "token"):
-                if not isinstance(cfg[key], str) or any(c in cfg[key] for c in "\r\n\0"):
-                    raise ValueError("invalid configuration value")
-            if "," in cfg["ssid"]:
-                raise ValueError("SSID with comma not supported by this test interface")
-            exchange(fd, f"AT+NETCFG={cfg['ssid']},{cfg['password']}")
-            exchange(fd, f"AT+UPLOADCFG={cfg['host']},{int(cfg['port'])},{cfg['device']},{cfg['token']}")
-            exchange(fd, f"AT+UPTIME={int(time.time())}")
+        if config is not None:
+            configure_upload(lambda command: exchange(fd, command), config)
         command = "AT+UPLOAD?"
         if args.upload:
             if any(c in args.upload for c in "\r\n\0"):

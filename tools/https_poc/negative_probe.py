@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import time
 
-from device import exchange
+from device import exchange, load_config
 
 
 def run(args):
@@ -18,9 +18,7 @@ def run(args):
 
     if not args.session.isascii() or not args.session.isdecimal() or len(args.session) != 14:
         raise ValueError("Session must contain 14 decimal digits")
-    if args.config.stat().st_mode & 0o077:
-        raise ValueError("Configuration must be private (mode 0600)")
-    config = json.loads(args.config.read_text())
+    config = load_config(args.config)
     reference = args.reference.read_bytes()
     object_id = hashlib.sha256(f"{config['device']}/{args.session}/1".encode()).hexdigest()
     target = args.received / (object_id + ".bin")

@@ -92,6 +92,12 @@ SDK 副本，不修改共享 NCS 工作区；DHCP 与 ARP 分开验证。
 
 先完成外置补丁启动验证，再连接 USB CDC。建立权限为 `0600` 的私有 JSON 配置，字段为 `ssid`、`password`、`host`、`port`、`device`、`token`。`host` 必须与证书中的 DNS 名称或 IP 地址一致，`device` 与接收端一致。`make_credentials.py --hostname` 接受 DNS 名称或 IPv4 地址，并生成对应 SAN 类型；局域网 IP 改变时需重新生成证书并构建。SSID 不支持逗号；首版只支持 2.4 GHz WPA2-Personal。
 
+`device.py`、`hardware_probe.py` 和 `negative_probe.py` 共用 `device.load_config`
+校验私有配置，在打开串口前检查字段、字节长度和端口范围。设备名只接受
+1–32 个 ASCII 字母、数字、下划线或连字符，令牌接受相同字符集的 32–96 个字符；
+密码为 8–63 字节，SSID 为 1–32 字节。USB 控制和上传采集共用同一配置命令序列；
+负向测试仍使用设备已有配置，不额外重新配置网络。
+
 ```sh
 python3 tools/https_poc/device.py --port /dev/cu.usbmodemXXXX --config /private/path/clip-test.json
 python3 tools/https_poc/device.py --port /dev/cu.usbmodemXXXX --upload SESSION_ID:1

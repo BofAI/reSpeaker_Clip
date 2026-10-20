@@ -11,20 +11,13 @@ import os
 from pathlib import Path
 import time
 
-from device import exchange
+from device import configure_upload, exchange, load_config
 
 
 def run(args):
     import serial
 
-    if args.config.stat().st_mode & 0o077:
-        raise ValueError("Configuration must be private (mode 0600)")
-    config = json.loads(args.config.read_text())
-    for key in ("ssid", "password", "host", "device", "token"):
-        if not isinstance(config[key], str) or any(c in config[key] for c in "\r\n\0"):
-            raise ValueError("Invalid configuration value")
-    if "," in config["ssid"] or not 1 <= int(config["port"]) <= 65535:
-        raise ValueError("Unsupported SSID or port")
+    config = load_config(args.config)
     if not args.session.isascii() or not args.session.isdecimal() or len(args.session) != 14:
         raise ValueError("Session must contain 14 decimal digits")
     reference = args.reference.read_bytes()
@@ -66,9 +59,7 @@ def run(args):
                 raise RuntimeError("Device must be idle")
             query("AT+RES")
             query("AT+LIST=" + args.session)
-            query(f"AT+NETCFG={config['ssid']},{config['password']}")
-            query(f"AT+UPLOADCFG={config['host']},{int(config['port'])},{config['device']},{config['token']}")
-            query("AT+UPTIME=" + str(int(time.time())))
+            configure_upload(query, config)
             stacks()
             results = []
             active = False
@@ -93,21 +84,12 @@ def run(args):
                     result = {"attempt": attempt+1, "status": status,
                               "elapsed_s": time.monotonic()-started,
                               "after_resources": resource}
-                    if getattr(args, "netdiag", False):
-                        points = [query(f"AT+NETDIAG={index}") for index in range(4)]
-                        if any(not point.get("ok") for point in points):
-                            raise RuntimeError("Network diagnostic query failed")
-                        result["netdiag"] = [point["data"] for point in points]
-                    if getattr(args, "nettrace", False):
-                        points = [query(f"AT+NETTRACE={index}") for index in range(4)]
-                        if any(not point.get("ok") for point in points):
-                            raise RuntimeError("Network trace query failed")
-                        result["nettrace"] = [point["data"] for point in points]
-                    if getattr(args, "nettx", False):
-                        points = [query(f"AT+NETTX={index}") for index in range(3)]
-                        if any(not point.get("ok") for point in points):
-                            raise RuntimeError("Firmware TX diagnostic query failed")
-                        result["nettx"] = [point["data"] for point in points]
+                    for option, command, count in (("netdiag", "NETDIAG", 4),
+                                                   ("nettrace", "NETTRACE", 4),
+                                                   ("nettx", "NETTX", 3)):
+                        if getattr(args, option, False):
+                            result[option] = [query(f"AT+{command}={index}")["data"]
+                                              for index in range(count)]
                     if status["stage"] == "succeeded":
                         actual = target.read_bytes()
                         if actual != reference:
