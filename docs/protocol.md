@@ -3,6 +3,16 @@
 > The optional `CLIP_HTTPS_POC` measurement build uses Wi-Fi Station and USB
 > CDC only (no AP or USB disk). Its USB-only configuration/upload commands
 > and restrictions are documented in [HTTPS experiment](../tools/https_poc/README.md).
+
+In that experimental build, START during an upload queues one recording request
+and returns `{"ok":true,"data":{"pending":true,"session":null}}`. It does not
+mean capture has started. Repeated START requests coalesce without changing the
+first request's mode. GSTAT adds `record_pending` (boolean) and `record_error`
+(the last deferred-start result, zero or negative errno). Wait for `recording:true`
+and obtain the actual session ID then. STOP can cancel a pending start. Upload
+resources are released before the queued recording starts; no concurrent capture
+and HTTPS is promised, and the blocking SDK connect path still needs latency
+validation. Stock builds retain their existing START/GSTAT responses.
 > Read-only `AT+RES` and thread stack queries remain available during uploads
 > when `CLIP_RESOURCE_STATS` is enabled. This is an experimental build profile.
 

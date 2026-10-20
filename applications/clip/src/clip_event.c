@@ -305,7 +305,7 @@ static void fg_save_work_handler(struct k_work *work)
 static bool clip_sd_busy(void)
 {
 #ifdef CONFIG_CLIP_HTTPS_POC
-    if (https_poc_active()) { return true; }
+    if (https_poc_active() || https_poc_record_pending()) { return true; }
 #endif
     if ((enum clip_state)atomic_get(&g_state) != CLIP_STATE_IDLE) {
         return true;
@@ -462,6 +462,10 @@ void clip_event_process(void)
 
     while (k_msgq_get(&clip_ev_msgq, &item, K_NO_WAIT) == 0) {
         enum clip_state current = (enum clip_state)atomic_get(&g_state);
+#ifdef CONFIG_CLIP_HTTPS_POC
+        bool deferred_record = false;
+        enum clip_event_result deferred_result = CLIP_EVENT_INVALID;
+#endif
 
         if (item.event >= CLIP_EVENT_COUNT) {
             LOG_WRN("Invalid event: %d", item.event);
@@ -472,7 +476,14 @@ void clip_event_process(void)
         if (https_poc_event(item.event, item.result,
             current == CLIP_STATE_IDLE && !audio_is_recording() &&
             !transfer_is_active() && !ota_in_progress)) {
-            goto notify;
+            if (item.event == CLIP_EVENT_UPLOAD_END && https_poc_record_pending()) {
+                /* END follows complete upload cleanup. Replay directly so
+                 * a full queue cannot lose the pending recording request. */
+                item.event = CLIP_EVENT_START;
+                deferred_record = true;
+            } else {
+                goto notify;
+            }
         }
 #endif
 
@@ -509,6 +520,9 @@ void clip_event_process(void)
                                                          : (enum clip_state)next;
 
         enum clip_event_result result = execute_transition(item.event, current, new_state);
+#ifdef CONFIG_CLIP_HTTPS_POC
+        deferred_result = result;
+#endif
 
         if (result == CLIP_EVENT_OK && next != TRANS_SAME) {
             /* Sanity check: warn if state leaves RECORDING while audio active */
@@ -524,6 +538,9 @@ void clip_event_process(void)
         }
 
 notify:
+#ifdef CONFIG_CLIP_HTTPS_POC
+        if (deferred_record) { https_poc_record_complete(deferred_result); }
+#endif
         if (item.done_sem) {
             k_sem_give(item.done_sem);
         }

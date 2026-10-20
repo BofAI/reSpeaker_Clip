@@ -228,6 +228,11 @@ class ClipClient:
     # Recording -------------------------------------------------------------
 
     async def start_recording(self, mode: str | None = None) -> str | None:
+        """Start, or queue recording behind HTTPS cleanup in experimental firmware.
+
+        A pending request returns None. Poll status() for record_pending,
+        record_error and recording before treating capture as started.
+        """
         if mode is None:
             response = await self.request("AT+START")
         else:

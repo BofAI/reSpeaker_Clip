@@ -49,17 +49,18 @@ enum { PREPARING = 1 };
 static int event_error, event_result, interrupts, resets, starts, clock_error;
 static long long wall_time;
 static bool https_poc_active(void) { return active; }
+static bool https_poc_record_pending(void) { return false; }
 static int atomic_get(int *v) { return *v; }
-static void atomic_set(int *v, int n) { *v = n; }
-static void atomic_clear(int *v) { *v = 0; }
-static void interrupt_socket(void) { interrupts++; }
+static void request_cancel(void) { cancelled = 1; interrupts++; }
 static void wifi_diag_reset(void) { resets++; }
 static void k_sem_give(int *sem) { (*sem)++; starts++; }
 static const char *wifi_station_last_step(void) { return "idle"; }
 static void wifi_station_get_network(struct wifi_station_network *n) { memset(n, 0, sizeof(*n)); }
 static int clip_post_event_sync(int event, struct clip_event_result_info *result) {
     assert(event == CLIP_EVENT_UPLOAD_BEGIN); result->result = event_result;
-    if (!event_error && !event_result) { active = true; }
+    if (!event_error && !event_result) {
+        active = true; cancelled = stalled = last_error = bytes_sent = 0; stage = PREPARING;
+    }
     return event_error;
 }
 static int clock_settime(int clock, const struct timespec *ts) {
@@ -184,7 +185,8 @@ int main(void) {
             root = Path(directory)
             code = '#include <stdbool.h>\n#include <string.h>\n#include <assert.h>\n'
             code += '#define CONFIG_CLIP_WIFI_DIAG 1\n#define IS_ENABLED(x) (x)\n'
-            code += 'static bool busy;\nstatic bool https_poc_active(void) {return busy;}\n'
+            code += 'static bool busy, pending;\nstatic bool https_poc_active(void) {return busy;}\n'
+            code += 'static bool https_poc_record_pending(void) {return pending;}\n'
             code += 'bool https_poc_command_allowed' + policy
             code += '''
 int main(void) {
@@ -200,8 +202,13 @@ int main(void) {
         assert(!https_poc_command_allowed("WIFI"));
     }
     assert(!https_poc_command_allowed("NETCFG"));
-    assert(!https_poc_command_allowed("START"));
+    assert(https_poc_command_allowed("START"));
+    assert(https_poc_command_allowed("STOP"));
     busy=false;
+    pending=true;
+    assert(!https_poc_command_allowed("NETCFG"));
+    assert(https_poc_command_allowed("START"));
+    pending=false;
     assert(https_poc_command_allowed("START"));
     return 0;
 }

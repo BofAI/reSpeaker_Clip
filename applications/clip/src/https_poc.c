@@ -33,6 +33,7 @@ BUILD_ASSERT(CONFIG_NET_SOCKETS_CONNECT_TIMEOUT > 0 &&
              "HTTPS requires bounded TCP + TLS connection timeouts (at most 30 seconds)");
 static atomic_t active, cancelled, stage, last_error, bytes_sent;
 static atomic_t stalled;
+static atomic_t record_pending, record_error, cleanup_error;
 enum { TLS_SETUP_IDLE, TLS_SETUP_DNS, TLS_SETUP_SOCKET, TLS_SETUP_CERTIFICATE,
        TLS_SETUP_VERIFY, TLS_SETUP_HOSTNAME, TLS_SETUP_SEND_TIMEOUT,
        TLS_SETUP_RECEIVE_TIMEOUT, TLS_SETUP_HANDSHAKE, TLS_SETUP_HTTP };
@@ -78,8 +79,27 @@ static char *split_field(char **cursor)
 static void interrupt_socket(void)
 {
     k_mutex_lock(&socket_lock, K_FOREVER);
-    if (running_socket >= 0) { zsock_shutdown(running_socket, ZSOCK_SHUT_RDWR); }
+    /* Recheck under the lifetime lock: a delayed cancellation can run after
+     * the old job closed and a new, uncancelled socket was published. */
+    if (running_socket >= 0 && (atomic_get(&cancelled) || atomic_get(&stalled))) {
+        zsock_shutdown(running_socket, ZSOCK_SHUT_RDWR);
+    }
     k_mutex_unlock(&socket_lock);
+}
+
+static void cancel_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+    /* SDK socket shutdown can wait for a blocking connect. Keep it out of
+     * the event and AT threads. A stale work item must not cancel a new job. */
+    if (atomic_get(&cancelled)) { interrupt_socket(); }
+}
+static K_WORK_DEFINE(cancel_work, cancel_handler);
+
+static void request_cancel(void)
+{
+    atomic_set(&cancelled, 1);
+    k_work_submit(&cancel_work);
 }
 
 static void stall_handler(struct k_work *work)
@@ -105,6 +125,16 @@ static const char *const names[] = {"idle", "preparing", "connecting", "tls", "s
     "verifying", "succeeded", "failed", "cancelled"};
 
 bool https_poc_active(void) { return atomic_get(&active); }
+bool https_poc_record_pending(void) { return atomic_get(&record_pending); }
+int https_poc_record_error(void) { return atomic_get(&record_error); }
+
+void https_poc_record_complete(enum clip_event_result result)
+{
+    int error = result == CLIP_EVENT_OK ? 0 : result == CLIP_EVENT_BUSY ? -EBUSY :
+                result == CLIP_EVENT_INVALID ? -EINVAL : -EIO;
+    atomic_set(&record_error, error);
+    atomic_clear(&record_pending);
+}
 
 bool https_poc_command_allowed(const char *name)
 {
@@ -116,8 +146,9 @@ bool https_poc_command_allowed(const char *name)
     }
     /* A deliberately small control surface also excludes deferred erase/reboot
      * commands which could outlive the AT handler and race a subsequent job. */
-    if (https_poc_active()) {
+    if (https_poc_active() || https_poc_record_pending()) {
         return !strcmp(name, "UPLOAD") || !strcmp(name, "UPLOADCANCEL") ||
+               !strcmp(name, "START") || !strcmp(name, "STOP") ||
                !strcmp(name, "GSTAT") || !strcmp(name, "BATT") || !strcmp(name, "VERSION");
     }
     return !strcmp(name, "NETCFG") || !strcmp(name, "UPLOADCFG") ||
@@ -133,18 +164,44 @@ bool https_poc_event(enum clip_event event, struct clip_event_result_info *resul
                      bool device_idle)
 {
     enum clip_event_result ret = CLIP_EVENT_OK;
+    int error = 0;
     if (event == CLIP_EVENT_UPLOAD_BEGIN) {
-        if (!device_idle || !atomic_cas(&active, 0, 1)) { ret = CLIP_EVENT_BUSY; }
+        if (!device_idle || https_poc_record_pending() || !atomic_cas(&active, 0, 1)) {
+            ret = CLIP_EVENT_BUSY;
+        } else {
+            /* Initialize in event order. Clearing after BEGIN returns could
+             * erase a button cancellation arriving before the worker wakes. */
+            atomic_clear(&cancelled); atomic_clear(&stalled);
+            atomic_clear(&last_error); atomic_clear(&bytes_sent);
+            atomic_clear(&cleanup_error);
+            atomic_set(&stage, PREPARING);
+        }
     } else if (event == CLIP_EVENT_UPLOAD_END) {
         atomic_clear(&active);
+        if (https_poc_record_pending() && atomic_get(&cleanup_error)) {
+            atomic_set(&record_error, atomic_get(&cleanup_error));
+            atomic_clear(&record_pending);
+        }
+    } else if (event == CLIP_EVENT_START && https_poc_active()) {
+        if (!https_poc_record_pending()) { atomic_clear(&record_error); }
+        atomic_set(&record_pending, 1);
+        request_cancel();
+        error = -EINPROGRESS;
+    } else if (event == CLIP_EVENT_STOP && https_poc_record_pending()) {
+        atomic_set(&record_error, -ECANCELED);
+        atomic_clear(&record_pending);
     } else if (https_poc_active() && event != CLIP_EVENT_STATUS_SHOW &&
                event != CLIP_EVENT_USB_CONNECTED) {
+        if (event == CLIP_EVENT_POWER_OFF_SHOW || event == CLIP_EVENT_POWER_OFF_EXEC) {
+            atomic_clear(&record_pending);
+            atomic_set(&record_error, -ECANCELED);
+        }
         if (event == CLIP_EVENT_POWER_OFF_EXEC) {
-            atomic_set(&cancelled, 1); interrupt_socket();
+            request_cancel();
         }
         ret = CLIP_EVENT_BUSY;
     } else { return false; }
-    if (result) { result->result = ret; }
+    if (result) { result->result = ret; result->error_code = error; }
     return true;
 }
 
@@ -369,8 +426,11 @@ static void worker(void *a, void *b, void *c)
         struct k_work_sync sync;
         k_work_cancel_delayable_sync(&stall_work, &sync);
         if (sock >= 0) { close_socket(sock); }
-        wifi_off();
-        if (opened) { fs_close(&file); }
+        atomic_set(&cleanup_error, wifi_off());
+        if (opened) {
+            int close_ret = fs_close(&file);
+            if (!atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, close_ret); }
+        }
         k_free(buffers);
         buffers = NULL;
         if (atomic_get(&cancelled)) { ret = -ECANCELED; }
@@ -447,11 +507,6 @@ static int start_upload(char *args)
     if (ret || result.result != CLIP_EVENT_OK) { return -EBUSY; }
     strcpy(session, args);
     segment = n;
-    atomic_clear(&cancelled);
-    atomic_clear(&stalled);
-    atomic_clear(&last_error);
-    atomic_clear(&bytes_sent);
-    atomic_set(&stage, PREPARING);
     wifi_diag_reset();
     k_sem_give(&start_job);
     return 0;
@@ -464,9 +519,9 @@ static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
     if (ctx->transport_type != TRANSPORT_TYPE_USB) { ret = -EACCES; goto reply; }
     if (!strcmp(ctx->name, "UPLOAD") && ctx->type != AT_CMD_TYPE_SET) { goto reply; }
     if (!strcmp(ctx->name, "UPLOADCANCEL")) {
-        atomic_set(&cancelled, 1); interrupt_socket(); goto reply;
+        request_cancel(); goto reply;
     }
-    if (https_poc_active()) { ret = -EBUSY; goto reply; }
+    if (https_poc_active() || https_poc_record_pending()) { ret = -EBUSY; goto reply; }
     if (!ctx->args) { ret = -EINVAL; goto reply; }
     if (strlen(ctx->args) >= sizeof(args)) { ret = -EINVAL; goto reply; }
     strcpy(args, ctx->args);

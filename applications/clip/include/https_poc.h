@@ -5,6 +5,9 @@
 #include "clip_event.h"
 int https_poc_register(void);
 bool https_poc_active(void);
+bool https_poc_record_pending(void);
+int https_poc_record_error(void);
+void https_poc_record_complete(enum clip_event_result result);
 bool https_poc_command_allowed(const char *name);
 bool https_poc_event(enum clip_event event, struct clip_event_result_info *result,
                      bool device_idle);

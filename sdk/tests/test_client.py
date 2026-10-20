@@ -42,8 +42,32 @@ async def test_current_firmware_status_and_storage_commands() -> None:
         status = await client.status()
         storage = await client.storage()
     assert status.battery_percent == 78
+    assert status.record_pending is False
+    assert status.record_error == 0
     assert storage.used_percent == 25
     assert transport.commands == ["AT+GSTAT", "AT+STORAGE?"]
+
+
+@pytest.mark.asyncio
+async def test_deferred_recording_is_not_reported_as_started() -> None:
+    transport = FakeTransport([
+        {"ok": True, "data": {"pending": True, "session": None}},
+        {"ok": True, "data": {"state": "IDLE", "recording": False,
+                              "record_pending": True, "record_error": 0}},
+        {"ok": True, "data": {"state": "RECORDING", "recording": True,
+                              "session": "20261019070446", "record_pending": False}},
+        {"ok": True, "data": {"state": "IDLE", "recording": False,
+                              "record_pending": False, "record_error": -5}},
+    ])
+    async with ClipClient(transport) as client:
+        assert await client.start_recording("enhanced") is None
+        pending = await client.status()
+        assert pending.record_pending and not pending.recording
+        started = await client.status()
+        assert started.recording and not started.record_pending
+        assert started.session_id == "20261019070446"
+        failed = await client.status()
+        assert not failed.record_pending and failed.record_error == -5
 
 
 @pytest.mark.asyncio

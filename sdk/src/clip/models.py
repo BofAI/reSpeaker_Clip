@@ -25,6 +25,8 @@ class Status:
     bitrate: int
     free_space_mb: int
     device_name: str
+    record_pending: bool = False
+    record_error: int = 0
 
     @classmethod
     def from_response(cls, response: dict[str, Any]) -> "Status":
@@ -42,6 +44,8 @@ class Status:
             bitrate=int(data.get("bitrate", 0)),
             free_space_mb=int(data.get("free_space", 0)),
             device_name=str(data.get("device", "Unknown")),
+            record_pending=bool(data.get("record_pending", False)),
+            record_error=int(data.get("record_error", 0)),
         )
 
 

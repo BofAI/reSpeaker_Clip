@@ -257,6 +257,9 @@ static int cmd_gstat_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     int data_len = snprintf(data_buf, sizeof(data_buf),
                      "{\"state\":\"%s\","
                      "\"recording\":%s,"
+#ifdef CONFIG_CLIP_HTTPS_POC
+                     "\"record_pending\":%s,\"record_error\":%d,"
+#endif
                      "\"session\":%s%s%s,"
                      "\"duration\":%u,"
                      "\"battery\":%u,"
@@ -269,6 +272,9 @@ static int cmd_gstat_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
                      "\"device\":\"%s\"}",
                      clip_state_to_string(clip_event_get_state()),
                      audio_is_recording() ? "true" : "false",
+#ifdef CONFIG_CLIP_HTTPS_POC
+                     https_poc_record_pending() ? "true" : "false", https_poc_record_error(),
+#endif
                      session_id ? "\"" : "", session_id ? session_id : "null", session_id ? "\"" : "",
                      recording_duration,
                      c->status.battery_percent,
@@ -840,6 +846,11 @@ static int cmd_format_handler(struct at_cmd_ctx *ctx, char *response, size_t len
 /* START Command Handler - Start recording */
 static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
+#ifdef CONFIG_CLIP_HTTPS_POC
+    if (https_poc_record_pending()) {
+        return create_json_response(true, NULL, "{\"pending\":true,\"session\":null}", response, len);
+    }
+#endif
     struct clip_context *c = clip_get_context();
     enum recording_mode rec_mode;
 
@@ -873,8 +884,14 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
      * mics (audio also waits for haptic quiet before powering them on). */
     haptic_play_pattern(HAPTIC_SHORT);
 
-    struct clip_event_result_info info;
+    struct clip_event_result_info info = {0};
     int ret = clip_post_event_sync(CLIP_EVENT_START, &info);
+
+#ifdef CONFIG_CLIP_HTTPS_POC
+    if (!ret && info.result == CLIP_EVENT_OK && info.error_code == -EINPROGRESS) {
+        return create_json_response(true, NULL, "{\"pending\":true,\"session\":null}", response, len);
+    }
+#endif
 
     if (ret != 0 || info.result != CLIP_EVENT_OK) {
         if (info.result == CLIP_EVENT_INVALID) {
@@ -911,6 +928,15 @@ static int cmd_start_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 /* STOP Command Handler - Stop recording */
 static int cmd_stop_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
+#ifdef CONFIG_CLIP_HTTPS_POC
+    if (https_poc_record_pending()) {
+        struct clip_event_result_info pending = {0};
+        int ret = clip_post_event_sync(CLIP_EVENT_STOP, &pending);
+        return create_json_response(!ret && pending.result == CLIP_EVENT_OK,
+                                    ret ? "Stop request failed" : NULL,
+                                    NULL, response, len);
+    }
+#endif
     const char *session_id = audio_get_session_id();
     if (!session_id) {
         return create_json_response(false, "No active session", NULL, response, len);
