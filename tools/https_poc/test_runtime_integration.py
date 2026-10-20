@@ -14,6 +14,118 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RuntimeIntegrationTest(unittest.TestCase):
+    def test_command_dispatch_preserves_validation_busy_cancel_and_start(self):
+        source = (ROOT / "applications/clip/src/https_poc.c").read_text()
+        parsing = "static char *split_field" + source.split("static char *split_field", 1)[1].split(
+            "static void interrupt_socket", 1)[0]
+        parsing += "static bool valid_id" + source.split("static bool valid_id", 1)[1].split(
+            "static int hash_file", 1)[0]
+        handlers = "static int configure_network" + source.split("static int configure_network", 1)[1].split(
+            "int https_poc_register", 1)[0]
+        code = r'''
+#include <assert.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+#include <errno.h>
+#define TRANSPORT_TYPE_USB 1
+#define AT_CMD_TYPE_SET 1
+#define CLOCK_REALTIME 0
+#define CLIP_EVENT_UPLOAD_BEGIN 1
+#define CLIP_EVENT_OK 0
+struct timespec { long long tv_sec; long tv_nsec; };
+struct at_cmd_ctx { int transport_type, type; const char *name, *args; };
+struct clip_event_result_info { int result; };
+struct wifi_station_network { char ip[16], netmask[16], gateway[16]; };
+static int active, cancelled, stalled, last_error, bytes_sent, stage, tls_step, start_job;
+static char ssid[33], password[64], host[96], port[6], device_id[33], token[97], session[32];
+static uint32_t segment;
+static bool time_ready;
+static const char *names[] = {"idle", "preparing"}, *tls_steps[] = {"idle"};
+enum { PREPARING = 1 };
+static int event_error, event_result, interrupts, resets, starts, clock_error;
+static long long wall_time;
+static bool https_poc_active(void) { return active; }
+static int atomic_get(int *v) { return *v; }
+static void atomic_set(int *v, int n) { *v = n; }
+static void atomic_clear(int *v) { *v = 0; }
+static void interrupt_socket(void) { interrupts++; }
+static void wifi_diag_reset(void) { resets++; }
+static void k_sem_give(int *sem) { (*sem)++; starts++; }
+static const char *wifi_station_last_step(void) { return "idle"; }
+static void wifi_station_get_network(struct wifi_station_network *n) { memset(n, 0, sizeof(*n)); }
+static int clip_post_event_sync(int event, struct clip_event_result_info *result) {
+    assert(event == CLIP_EVENT_UPLOAD_BEGIN); result->result = event_result;
+    if (!event_error && !event_result) { active = true; }
+    return event_error;
+}
+static int clock_settime(int clock, const struct timespec *ts) {
+    assert(clock == CLOCK_REALTIME);
+    if (clock_error) { errno = EIO; return -1; }
+    wall_time = ts->tv_sec; return 0;
+}
+'''
+        code += parsing + handlers
+        code += r'''
+static void request(const char *name, const char *args, int transport, int type, int expected) {
+    struct at_cmd_ctx ctx = {.name=name, .args=args, .transport_type=transport, .type=type};
+    char response[1024], error[32];
+    int n = command(&ctx, response, sizeof(response));
+    assert(n > 0 && (size_t)n == strlen(response));
+    snprintf(error, sizeof(error), "\"error\":%d,", expected);
+    assert(strstr(response, error));
+    assert(strstr(response, expected ? "\"ok\":false" : "\"ok\":true"));
+    assert(!strstr(response, "test-password"));
+}
+int main(void) {
+    request("NETCFG", "test,test-password", 0, AT_CMD_TYPE_SET, -EACCES);
+    assert(!ssid[0]);
+    request("NETCFG", "test,short", 1, AT_CMD_TYPE_SET, -EINVAL);
+    request("NETCFG", "test,test-password", 1, AT_CMD_TYPE_SET, 0);
+    assert(!strcmp(ssid, "test") && !strcmp(password, "test-password"));
+    request("UPLOADCFG", "receiver,8443,fixture", 1, AT_CMD_TYPE_SET, -EINVAL);
+    request("UPLOADCFG", "receiver,0,fixture,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, AT_CMD_TYPE_SET, -EINVAL);
+    assert(!host[0]);
+    request("UPLOADCFG", "receiver,8443,fixture,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, AT_CMD_TYPE_SET, 0);
+    assert(!strcmp(host, "receiver") && !strcmp(port, "8443"));
+    request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, -EINVAL);
+    request("UPTIME", "invalid", 1, AT_CMD_TYPE_SET, -EINVAL);
+    clock_error = 1;
+    request("UPTIME", "1800000000", 1, AT_CMD_TYPE_SET, -EIO);
+    assert(!time_ready);
+    clock_error = 0;
+    request("UPTIME", "1800000000", 1, AT_CMD_TYPE_SET, 0);
+    assert(time_ready && wall_time == 1800000000LL);
+    request("UPLOAD", "20261019070446:0", 1, AT_CMD_TYPE_SET, -EINVAL);
+    event_error = -EIO;
+    request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, -EBUSY);
+    event_error = 0; event_result = 1;
+    request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, -EBUSY);
+    assert(!starts && !resets);
+    event_result = 0; cancelled = stalled = last_error = bytes_sent = 1;
+    request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, 0);
+    assert(active && starts == 1 && resets == 1 && stage == PREPARING);
+    assert(segment == 1 && !strcmp(session, "20261019070446"));
+    assert(!cancelled && !stalled && !last_error && !bytes_sent);
+    request("UPLOAD", NULL, 1, 0, 0);
+    request("NETCFG", "other,test-password", 1, AT_CMD_TYPE_SET, -EBUSY);
+    assert(!strcmp(ssid, "test"));
+    request("UPLOADCANCEL", NULL, 1, 0, 0);
+    assert(cancelled && interrupts == 1);
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "test.c").write_text(code)
+            subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=address,undefined", str(root / "test.c"),
+                            "-o", str(root / "test")], check=True)
+            subprocess.run([str(root / "test")], check=True)
+
     def test_cleanup_before_radio_start_is_safe_and_idempotent(self):
         source = (ROOT / "applications/clip/src/wifi_station.c").read_text()
         cleanup = source.split("int wifi_off(void)", 1)[1].split(

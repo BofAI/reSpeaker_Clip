@@ -110,9 +110,10 @@ bool https_poc_command_allowed(const char *name)
 {
     /* Read-only instrumentation must remain available during TLS/upload. */
     if (!strcmp(name, "RES")) { return true; }
-    if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETDIAG")) { return true; }
-    if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETTRACE")) { return true; }
-    if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETTX")) { return true; }
+    if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) &&
+        (!strcmp(name, "NETDIAG") || !strcmp(name, "NETTRACE") || !strcmp(name, "NETTX"))) {
+        return true;
+    }
     /* A deliberately small control surface also excludes deferred erase/reboot
      * commands which could outlive the AT handler and race a subsequent job. */
     if (https_poc_active()) {
@@ -386,6 +387,76 @@ static void worker(void *a, void *b, void *c)
 /* Full ECDSA handshakes measured 5816 B; 6 KiB left only 328 B. */
 K_THREAD_DEFINE(https_worker, 8192, worker, NULL, NULL, NULL, 7, 0, 0);
 
+static int configure_network(char *args)
+{
+    char *split = strchr(args, ',');
+    if (!split) { return -EINVAL; }
+    *split++ = 0;
+    if (!strlen(args) || strlen(args) > 32 || strlen(split) < 8 || strlen(split) > 63) {
+        return -EINVAL;
+    }
+    strcpy(ssid, args);
+    strcpy(password, split);
+    return 0;
+}
+
+static int configure_receiver(char *args)
+{
+    char *fields[4], *cursor = args;
+    for (int i = 0; i < 4; i++) { fields[i] = split_field(&cursor); }
+    if (cursor || !fields[3] || !valid_id(fields[2], 32) ||
+        !valid_id(fields[3], 96) || strlen(fields[3]) < 32 ||
+        !fields[0][0] || strlen(fields[0]) >= sizeof(host)) { return -EINVAL; }
+    for (char *p = fields[0]; *p; p++) {
+        if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-') { return -EINVAL; }
+    }
+    char *end;
+    unsigned long n = strtoul(fields[1], &end, 10);
+    if (!fields[1][0] || *end || n < 1 || n > 65535 || strlen(fields[1]) > 5) {
+        return -EINVAL;
+    }
+    strcpy(host, fields[0]);
+    strcpy(port, fields[1]);
+    strcpy(device_id, fields[2]);
+    strcpy(token, fields[3]);
+    return 0;
+}
+
+static int set_upload_time(const char *args)
+{
+    char *end;
+    long long timestamp = strtoll(args, &end, 10);
+    if (*end || timestamp < 1700000000LL || timestamp > 4102444800LL) { return -EINVAL; }
+    struct timespec ts = {.tv_sec = timestamp, .tv_nsec = 0};
+    int ret = clock_settime(CLOCK_REALTIME, &ts) ? -errno : 0;
+    time_ready = ret == 0;
+    return ret;
+}
+
+static int start_upload(char *args)
+{
+    char *split = strchr(args, ':');
+    if (!split) { return -EINVAL; }
+    *split++ = 0;
+    char *end;
+    unsigned long n = strtoul(split, &end, 10);
+    if (!valid_id(args, 31) || !*split || *end || !n || n > 999999999 ||
+        !ssid[0] || !host[0] || !time_ready) { return -EINVAL; }
+    struct clip_event_result_info result;
+    int ret = clip_post_event_sync(CLIP_EVENT_UPLOAD_BEGIN, &result);
+    if (ret || result.result != CLIP_EVENT_OK) { return -EBUSY; }
+    strcpy(session, args);
+    segment = n;
+    atomic_clear(&cancelled);
+    atomic_clear(&stalled);
+    atomic_clear(&last_error);
+    atomic_clear(&bytes_sent);
+    atomic_set(&stage, PREPARING);
+    wifi_diag_reset();
+    k_sem_give(&start_job);
+    return 0;
+}
+
 static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
 {
     int ret = 0;
@@ -400,49 +471,14 @@ static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
     if (strlen(ctx->args) >= sizeof(args)) { ret = -EINVAL; goto reply; }
     strcpy(args, ctx->args);
     if (!strcmp(ctx->name, "NETCFG")) {
-        char *split = strchr(args, ',');
-        if (!split) { ret = -EINVAL; goto reply; }
-        *split++ = 0;
-        if (!strlen(args) || strlen(args) > 32 || strlen(split) < 8 || strlen(split) > 63) {
-            ret = -EINVAL; goto reply;
-        }
-        strcpy(ssid, args); strcpy(password, split);
+        ret = configure_network(args);
     } else if (!strcmp(ctx->name, "UPLOADCFG")) {
-        char *fields[4], *cursor = args;
-        for (int i = 0; i < 4; i++) { fields[i] = split_field(&cursor); }
-        if (cursor || !fields[3] || !valid_id(fields[2], 32) ||
-            !valid_id(fields[3], 96) || strlen(fields[3]) < 32 ||
-            !fields[0][0] || strlen(fields[0]) >= sizeof(host)) { ret = -EINVAL; goto reply; }
-        for (char *p = fields[0]; *p; p++) {
-            if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-') { ret = -EINVAL; goto reply; }
-        }
-        char *end; unsigned long n = strtoul(fields[1], &end, 10);
-        if (!fields[1][0] || *end || n < 1 || n > 65535 || strlen(fields[1]) > 5) { ret = -EINVAL; goto reply; }
-        strcpy(host, fields[0]); strcpy(port, fields[1]); strcpy(device_id, fields[2]); strcpy(token, fields[3]);
+        ret = configure_receiver(args);
     } else if (!strcmp(ctx->name, "UPTIME")) {
-        char *end; long long timestamp = strtoll(args, &end, 10);
-        if (*end || timestamp < 1700000000LL || timestamp > 4102444800LL) { ret = -EINVAL; goto reply; }
-        struct timespec ts = {.tv_sec = timestamp, .tv_nsec = 0};
-        ret = clock_settime(CLOCK_REALTIME, &ts) ? -errno : 0;
-        time_ready = ret == 0;
+        ret = set_upload_time(args);
     } else if (!strcmp(ctx->name, "UPLOAD")) {
-        char *split = strchr(args, ':');
-        if (!split) { ret = -EINVAL; goto reply; }
-        *split++ = 0;
-        char *end; unsigned long n = strtoul(split, &end, 10);
-        if (!valid_id(args, 31) || !*split || *end || !n || n > 999999999 ||
-            !ssid[0] || !host[0] || !time_ready) { ret = -EINVAL; goto reply; }
-        struct clip_event_result_info result;
-        ret = clip_post_event_sync(CLIP_EVENT_UPLOAD_BEGIN, &result);
-        if (ret || result.result != CLIP_EVENT_OK) { ret = -EBUSY; goto reply; }
-        strcpy(session, args); segment = n;
-        atomic_clear(&cancelled); atomic_clear(&stalled);
-        atomic_clear(&last_error); atomic_clear(&bytes_sent);
-        atomic_set(&stage, PREPARING);
-        wifi_diag_reset();
-        k_sem_give(&start_job);
+        ret = start_upload(args);
     } else { ret = -ENOTSUP; }
-    memset(args, 0, sizeof(args));
 reply:
     memset(args, 0, sizeof(args));
     struct wifi_station_network network;
