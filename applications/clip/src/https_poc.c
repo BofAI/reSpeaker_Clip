@@ -1,8 +1,7 @@
 /* Single-job HTTPS experiment. No local deletion or persistent credentials. */
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
-#include <zephyr/net/tls_credentials.h>
-#include <zephyr/net/http/client.h>
+#include <zephyr/net/http/parser.h>
 #include <zephyr/data/json.h>
 #include <zephyr/fs/fs.h>
 #include <mbedtls/sha256.h>
@@ -13,6 +12,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "https_poc.h"
+#include "https_stream.h"
 #include "wifi_diag.h"
 #include "wifi_trace.h"
 #include "at_server.h"
@@ -21,7 +21,6 @@
 #include "wifi.h"
 #include "https_ca.h"
 
-#define CA_TAG 71
 BUILD_ASSERT(IS_ENABLED(CONFIG_PSA_WANT_ALG_ECDSA) &&
              IS_ENABLED(CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED),
              "The HTTPS experiment's EC test certificates require ECDHE-ECDSA support");
@@ -40,8 +39,6 @@ enum { TLS_SETUP_IDLE, TLS_SETUP_DNS, TLS_SETUP_SOCKET, TLS_SETUP_CERTIFICATE,
 static atomic_t tls_step;
 static const char *const tls_steps[] = {"idle", "resolve", "socket", "certificate",
     "peer_verify", "hostname", "send_timeout", "receive_timeout", "handshake", "http"};
-static K_MUTEX_DEFINE(socket_lock);
-static int running_socket = -1;
 static K_SEM_DEFINE(start_job, 0, 1);
 static char ssid[33], password[64], host[96], port[6], device_id[33], token[97];
 static char session[32];
@@ -61,7 +58,7 @@ static struct upload_buffers {
 static char expected_hash[65];
 static size_t response_length, file_length, header_bytes;
 static bool response_final;
-static int response_status, response_error;
+static int response_status;
 
 /* Wall time uses libc time()/CLOCK_REALTIME; TLS timers use monotonic uptime. */
 mbedtls_ms_time_t mbedtls_ms_time(void) { return k_uptime_get(); }
@@ -76,49 +73,21 @@ static char *split_field(char **cursor)
     return value;
 }
 
-static void interrupt_socket(void)
-{
-    k_mutex_lock(&socket_lock, K_FOREVER);
-    /* Recheck under the lifetime lock: a delayed cancellation can run after
-     * the old job closed and a new, uncancelled socket was published. */
-    if (running_socket >= 0 && (atomic_get(&cancelled) || atomic_get(&stalled))) {
-        zsock_shutdown(running_socket, ZSOCK_SHUT_RDWR);
-    }
-    k_mutex_unlock(&socket_lock);
-}
-
-static void cancel_handler(struct k_work *work)
-{
-    ARG_UNUSED(work);
-    /* SDK socket shutdown can wait for a blocking connect. Keep it out of
-     * the event and AT threads. A stale work item must not cancel a new job. */
-    if (atomic_get(&cancelled)) { interrupt_socket(); }
-}
-static K_WORK_DEFINE(cancel_work, cancel_handler);
-
 static void request_cancel(void)
 {
+    /* Only the upload thread owns TCP and TLS. Its bounded waits observe this
+     * flag, without blocking the event thread or the system workqueue. */
     atomic_set(&cancelled, 1);
-    k_work_submit(&cancel_work);
 }
 
 static void stall_handler(struct k_work *work)
 {
     ARG_UNUSED(work);
     atomic_set(&stalled, 1);
-    interrupt_socket();
 }
 static K_WORK_DELAYABLE_DEFINE(stall_work, stall_handler);
 
 static void progress(void) { k_work_reschedule(&stall_work, K_SECONDS(15)); }
-
-static void close_socket(int sock)
-{
-    k_mutex_lock(&socket_lock, K_FOREVER);
-    running_socket = -1;
-    zsock_close(sock);
-    k_mutex_unlock(&socket_lock);
-}
 
 enum { IDLE, PREPARING, CONNECTING, TLS, SENDING, VERIFYING, SUCCEEDED, FAILED, CANCELLED };
 static const char *const names[] = {"idle", "preparing", "connecting", "tls", "sending",
@@ -208,6 +177,7 @@ bool https_poc_event(enum clip_event event, struct clip_event_result_info *resul
 static int check_cancel(void)
 {
     if (atomic_get(&cancelled)) { return -ECANCELED; }
+    if (atomic_get(&stalled)) { return -ETIMEDOUT; }
     return k_uptime_get() >= deadline ? -ETIMEDOUT : 0;
 }
 
@@ -243,9 +213,8 @@ static int hash_file(void)
     return fs_seek(&file, 0, FS_SEEK_SET);
 }
 
-static int send_payload(int sock, struct http_request *req, void *user)
+static int send_payload(struct https_stream *stream)
 {
-    ARG_UNUSED(req); ARG_UNUSED(user);
     size_t total = 0;
     atomic_set(&stage, SENDING);
     while (total < file_length) {
@@ -253,17 +222,11 @@ static int send_payload(int sock, struct http_request *req, void *user)
         if (ret) { return ret; }
         ssize_t n = fs_read(&file, io, MIN(sizeof(io), file_length - total));
         if (n <= 0) { return n < 0 ? (int)n : -EIO; }
-        size_t sent = 0;
-        while (sent < n) {
-            ret = check_cancel();
-            if (ret) { return ret; }
-            ssize_t count = zsock_send(sock, io + sent, n - sent, 0);
-            if (count <= 0) { return count < 0 ? -errno : -EIO; }
-            sent += count;
-            progress();
-            atomic_set(&bytes_sent, total + sent);
-        }
+        ret = https_stream_write(stream, io, n);
+        if (ret) { return ret; }
         total += n;
+        progress();
+        atomic_set(&bytes_sent, total);
     }
     return (int)total;
 }
@@ -272,59 +235,63 @@ static int header_fragment(struct http_parser *parser, const char *at, size_t le
 {
     ARG_UNUSED(parser); ARG_UNUSED(at);
     progress();
-    /* The SDK ignores parser-hook return values. Latch the error for the
-     * response callback (called for each receive buffer) and final check. */
-    if (length > 4096 - header_bytes) { response_error = -EMSGSIZE; }
-    else { header_bytes += length; }
-    return response_error;
+    if (length > 4096 - header_bytes) { return -EMSGSIZE; }
+    header_bytes += length;
+    return check_cancel();
 }
 
-static int receive_response(struct http_response *rsp, enum http_final_call final, void *user)
+static int body_fragment(struct http_parser *parser, const char *at, size_t length)
 {
-    ARG_UNUSED(user);
+    ARG_UNUSED(parser);
     progress();
-    if (!response_error) { response_error = check_cancel(); }
-    if (rsp->body_frag_len > 1024 - response_length) { response_error = -EMSGSIZE; }
-    if (response_error) { return response_error; }
-    if (rsp->body_frag_len) {
-        memcpy(response_body + response_length, rsp->body_frag_start, rsp->body_frag_len);
-        response_length += rsp->body_frag_len;
-    }
-    response_status = rsp->http_status_code;
-    response_final = final == HTTP_DATA_FINAL;
-    return 0;
+    if (length > 1024 - response_length) { return -EMSGSIZE; }
+    memcpy(response_body + response_length, at, length);
+    response_length += length;
+    return check_cancel();
 }
 
-static int upload(int sock)
+static int message_complete(struct http_parser *parser)
 {
-    char url[180], auth[128], hash_header[90];
-    snprintf(url, sizeof(url), "/v1/devices/%s/recordings/%s/%u", device_id, session, segment);
-    snprintf(auth, sizeof(auth), "Authorization: Bearer %s\r\n", token);
-    snprintf(hash_header, sizeof(hash_header), "X-Content-SHA256: %s\r\n", expected_hash);
-    const char *headers[] = {auth, hash_header, "Connection: close\r\n", NULL};
-    struct http_parser_settings callbacks = {
+    response_status = parser->status_code;
+    response_final = true;
+    return check_cancel();
+}
+
+static int upload(struct https_stream *stream)
+{
+    int n = snprintf((char *)io, sizeof(io),
+        "PUT /v1/devices/%s/recordings/%s/%u HTTP/1.1\r\n"
+        "Host: %s:%s\r\nAuthorization: Bearer %s\r\n"
+        "X-Content-SHA256: %s\r\nConnection: close\r\n"
+        "Content-Type: application/octet-stream\r\nContent-Length: %u\r\n\r\n",
+        device_id, session, segment, host, port, token, expected_hash, (unsigned int)file_length);
+    if (n < 0 || (size_t)n >= sizeof(io)) { return -EMSGSIZE; }
+    progress();
+    int ret = https_stream_write(stream, io, n);
+    memset(io, 0, sizeof(io));
+    if (ret) { return ret; }
+    ret = send_payload(stream);
+    if (ret < 0) { return ret; }
+    struct http_parser parser;
+    http_parser_init(&parser, HTTP_RESPONSE);
+    parser.method = HTTP_PUT;
+    const struct http_parser_settings callbacks = {
         .on_header_field = header_fragment, .on_header_value = header_fragment,
-    };
-    struct http_request req = {
-        .method = HTTP_PUT, .url = url, .protocol = "HTTP/1.1", .host = host, .port = port,
-        .header_fields = headers, .content_type_value = "application/octet-stream",
-        .payload_cb = send_payload, .payload_len = file_length,
-        .response = receive_response, .recv_buf = recv_buffer, .recv_buf_len = sizeof(recv_buffer),
-        .http_cb = &callbacks,
+        .on_body = body_fragment, .on_message_complete = message_complete,
     };
     response_length = header_bytes = 0;
     response_final = false;
     response_status = 0;
-    response_error = 0;
     memset(response_body, 0, sizeof(response_body));
-    int remaining = (int)(deadline - k_uptime_get());
-    if (remaining <= 0) { return -ETIMEDOUT; }
-    progress();
-    int ret = http_client_req(sock, &req, remaining, NULL);
-    memset(auth, 0, sizeof(auth));
-    /* The SDK also ignores the FINAL response callback's return value. */
-    if (response_error) { return response_error; }
-    if (ret < 0) { return ret; }
+    while (!response_final) {
+        ssize_t count = https_stream_read(stream, recv_buffer, sizeof(recv_buffer));
+        if (count < 0) { return count; }
+        size_t used = http_parser_execute(&parser, &callbacks, (char *)recv_buffer, count);
+        ret = check_cancel();
+        if (ret) { return ret; }
+        if (HTTP_PARSER_ERRNO(&parser) != HPE_OK || used != (size_t)count) { return -EBADMSG; }
+        if (!count && !response_final) { return -EBADMSG; }
+    }
     atomic_set(&stage, VERIFYING);
     if (!response_final || (response_status != 200 && response_status != 201)) { return -EBADMSG; }
     struct receipt { char *status; int size; char *sha256; } receipt;
@@ -339,7 +306,7 @@ static int upload(int sock)
     return 0;
 }
 
-static int tls_connect(void)
+static int tls_connect(struct https_stream **stream)
 {
     atomic_set(&tls_step, TLS_SETUP_DNS);
     struct zsock_addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_STREAM};
@@ -354,44 +321,16 @@ static int tls_connect(void)
     wifi_trace_peer(((struct sockaddr_in *)address->ai_addr)->sin_addr.s_addr, local.s_addr);
 #endif
     atomic_set(&tls_step, TLS_SETUP_SOCKET);
-    int sock = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TLS_1_2);
-    if (sock < 0) { zsock_freeaddrinfo(address); return -errno; }
-    k_mutex_lock(&socket_lock, K_FOREVER);
-    running_socket = sock;
-    k_mutex_unlock(&socket_lock);
-    if ((ret = check_cancel()) != 0) { goto out; }
-    sec_tag_t tags[] = {CA_TAG};
-    int verify = TLS_PEER_VERIFY_REQUIRED;
-    struct timeval timeout = {.tv_sec = 15};
-#define OPTION(level, name, value, size) do { \
-    if (zsock_setsockopt(sock, level, name, value, size) < 0) { ret = -errno; goto out; } \
-} while (0)
-    atomic_set(&tls_step, TLS_SETUP_CERTIFICATE);
-    OPTION(SOL_TLS, TLS_SEC_TAG_LIST, tags, sizeof(tags));
-    atomic_set(&tls_step, TLS_SETUP_VERIFY);
-    OPTION(SOL_TLS, TLS_PEER_VERIFY, &verify, sizeof(verify));
-    atomic_set(&tls_step, TLS_SETUP_HOSTNAME);
-    OPTION(SOL_TLS, TLS_HOSTNAME, host, strlen(host) + 1);
-    atomic_set(&tls_step, TLS_SETUP_SEND_TIMEOUT);
-    OPTION(SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-    atomic_set(&tls_step, TLS_SETUP_RECEIVE_TIMEOUT);
-    OPTION(SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-#undef OPTION
-    /* In this SDK, TLS connect performs blocking TCP connect and handshake.
-     * Use the explicit Kconfig timeouts, not POLLOUT (TCP writability does
-     * not prove the TLS handshake completed). Keep within the job deadline. */
-    if (deadline - k_uptime_get() < CONNECT_BUDGET_MS) { ret = -ETIMEDOUT; goto out; }
+    if (deadline - k_uptime_get() < CONNECT_BUDGET_MS) {
+        zsock_freeaddrinfo(address); return -ETIMEDOUT;
+    }
     atomic_set(&tls_step, TLS_SETUP_HANDSHAKE);
     wifi_diag_capture(WIFI_DIAG_CONNECT_BEGIN, 0);
-    ret = zsock_connect(sock, address->ai_addr, address->ai_addrlen);
-    if (ret < 0) { ret = -errno; }
+    ret = https_stream_open(stream, address->ai_addr, address->ai_addrlen,
+                            host, https_ca, sizeof(https_ca), check_cancel);
     wifi_diag_capture(WIFI_DIAG_CONNECT_END, ret);
-    int cancel_ret = check_cancel();
-    if (cancel_ret) { ret = cancel_ret; }
-out:
     zsock_freeaddrinfo(address);
-    if (ret < 0) { close_socket(sock); return ret; }
-    return sock;
+    return ret;
 }
 
 static void worker(void *a, void *b, void *c)
@@ -406,7 +345,7 @@ static void worker(void *a, void *b, void *c)
         buffers = k_malloc(sizeof(*buffers));
         int ret = buffers ? storage_ensure_mounted() : -ENOMEM;
         bool opened = false;
-        int sock = -1;
+        struct https_stream *stream = NULL;
         struct fs_dirent entry;
         if (!ret) { ret = storage_build_chunk_path(session, segment, path, sizeof(path)); }
         if (!ret) { ret = fs_stat(path, &entry); }
@@ -420,12 +359,12 @@ static void worker(void *a, void *b, void *c)
         }
         if (!ret) {
             atomic_set(&stage, TLS);
-            sock = tls_connect(); if (sock < 0) { ret = sock; }
+            ret = tls_connect(&stream);
         }
-        if (!ret) { atomic_set(&tls_step, TLS_SETUP_HTTP); ret = upload(sock); }
+        if (!ret) { atomic_set(&tls_step, TLS_SETUP_HTTP); ret = upload(stream); }
         struct k_work_sync sync;
         k_work_cancel_delayable_sync(&stall_work, &sync);
-        if (sock >= 0) { close_socket(sock); }
+        https_stream_close(stream);
         atomic_set(&cleanup_error, wifi_off());
         if (opened) {
             int close_ret = fs_close(&file);
@@ -548,8 +487,7 @@ reply:
 
 int https_poc_register(void)
 {
-    int ret = tls_credential_add(CA_TAG, TLS_CREDENTIAL_CA_CERTIFICATE, https_ca, sizeof(https_ca));
-    if (ret) { return ret; }
+    int ret;
     static const struct at_command commands[] = {
         {"NETCFG", AT_CMD_SET, command}, {"UPLOADCFG", AT_CMD_SET, command},
         {"UPTIME", AT_CMD_SET, command}, {"UPLOAD", AT_CMD_SET | AT_CMD_QUERY, command},

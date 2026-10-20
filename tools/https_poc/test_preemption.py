@@ -16,10 +16,8 @@ class PreemptionTest(unittest.TestCase):
         event_source = (ROOT / "applications/clip/src/clip_event.c").read_text()
         events = (ROOT / "applications/clip/include/clip_event.h").read_text()
         enums = events[events.index("enum clip_event {"):events.index("/**\n * @brief Event handler result info")]
-        cancel = "static void cancel_handler" + source.split("static void cancel_handler", 1)[1].split(
+        cancel = "static void request_cancel" + source.split("static void request_cancel", 1)[1].split(
             "static void stall_handler", 1)[0]
-        interrupt = "static void interrupt_socket" + source.split("static void interrupt_socket", 1)[1].split(
-            "static void cancel_handler", 1)[0]
         getters = "bool https_poc_active" + source.split("bool https_poc_active", 1)[1].split(
             "bool https_poc_command_allowed", 1)[0]
         gate = "bool https_poc_event" + source.split("bool https_poc_event", 1)[1].split(
@@ -45,8 +43,6 @@ class PreemptionTest(unittest.TestCase):
 #define LOG_WRN(...) ((void)0)
 #define LOG_INF(...) ((void)0)
 #define K_NO_WAIT 0
-#define K_FOREVER 0
-#define ZSOCK_SHUT_RDWR 2
 #define TRANS_INVALID 255
 #define TRANS_SAME 254
 typedef int atomic_val_t;
@@ -58,14 +54,10 @@ enum clip_state { CLIP_STATE_IDLE, CLIP_STATE_RECORDING, CLIP_STATE_WIFI_SYNC };
         code += r'''
 struct clip_event_result_info { enum clip_event_result result; int error_code; };
 struct clip_event_item { enum clip_event event; struct clip_event_result_info *result; int *done_sem; };
-struct k_work { void (*handler)(struct k_work *); bool pending; };
-#define K_WORK_DEFINE(name, fn) struct k_work name = {.handler = fn}
 static int active, cancelled, stalled, last_error, bytes_sent, stage, record_pending, record_error, cleanup_error;
 static int start_job, g_state, clip_ev_msgq, ota_in_progress;
 static bool audio_active, resources_released, inject_start;
 static int interrupts, record_starts, started_jobs;
-static int running_socket = 7, socket_lock;
-static bool replace_socket_on_lock;
 static enum clip_event_result recording_result = CLIP_EVENT_OK;
 static char ssid[33] = "fixture", host[96] = "receiver", session[32];
 static unsigned int segment;
@@ -78,18 +70,6 @@ static int atomic_get(int *v) { return *v; }
 static void atomic_set(int *v, int n) { *v = n; }
 static void atomic_clear(int *v) { *v = 0; }
 static bool atomic_cas(int *v, int old, int n) { if (*v != old) return false; *v = n; return true; }
-static int k_mutex_lock(int *lock, int timeout) {
-    (void)lock; (void)timeout;
-    if (replace_socket_on_lock) {
-        cancelled = stalled = 0; running_socket = 9;
-    }
-    return 0;
-}
-static void k_mutex_unlock(int *lock) { (void)lock; }
-static int zsock_shutdown(int fd, int how) {
-    assert(fd == 7 && how == ZSOCK_SHUT_RDWR); interrupts++; return 0;
-}
-static int k_work_submit(struct k_work *work) { work->pending = true; return 1; }
 static void k_sem_give(int *sem) { (*sem)++; }
 static bool audio_is_recording(void) { return audio_active; }
 static bool transfer_is_active(void) { return false; }
@@ -110,7 +90,7 @@ static enum clip_event_result execute_transition(enum clip_event event,
     return recording_result;
 }
 '''
-        code += interrupt + cancel + getters + gate + valid + start + dispatch
+        code += cancel + getters + gate + valid + start + dispatch
         code += r'''
 static int clip_post_event_sync(enum clip_event event, struct clip_event_result_info *info) {
     assert(https_poc_event(event, info, g_state == CLIP_STATE_IDLE));
@@ -165,16 +145,7 @@ int main(int argc, char **argv) {
          * START in place, without trying to enqueue another event. */
         for (int i=0; i<3; i++) queue[queued++] = (struct clip_event_item){CLIP_EVENT_COUNT, NULL, NULL};
     }
-    assert(cancel_work.pending && !interrupts);
-    cancel_work.pending = false;
-    if (!strcmp(argv[1], "stale-lock")) {
-        replace_socket_on_lock = true;
-        cancel_work.handler(&cancel_work);
-        assert(!interrupts && running_socket == 9);
-        return 0;
-    }
-    cancel_work.handler(&cancel_work);
-    assert(interrupts == 1);
+    assert(cancelled && !interrupts);
     finish_upload();
     assert(!active && !record_pending);
     if (!strcmp(argv[1], "cleanup-failure")) {
@@ -188,8 +159,8 @@ int main(int argc, char **argv) {
         assert(g_state == (recording_result == CLIP_EVENT_OK ? CLIP_STATE_RECORDING : CLIP_STATE_IDLE));
     }
     cancelled = 0;
-    cancel_work.handler(&cancel_work);
-    assert(interrupts == 1); /* stale cancel work cannot interrupt a new job */
+    /* Cancellation creates no background work capable of touching a new job. */
+    assert(!interrupts);
     return 0;
 }
 '''
@@ -221,9 +192,6 @@ int main(int argc, char **argv) {
 
     def test_record_start_failure_is_visible(self):
         subprocess.run([str(self.executable), "failure"], check=True)
-
-    def test_delayed_cancellation_cannot_shutdown_new_socket(self):
-        subprocess.run([str(self.executable), "stale-lock"], check=True)
 
     def test_failed_radio_cleanup_does_not_start_recording(self):
         subprocess.run([str(self.executable), "cleanup-failure"], check=True)

@@ -17,7 +17,7 @@ class RuntimeIntegrationTest(unittest.TestCase):
     def test_command_dispatch_preserves_validation_busy_cancel_and_start(self):
         source = (ROOT / "applications/clip/src/https_poc.c").read_text()
         parsing = "static char *split_field" + source.split("static char *split_field", 1)[1].split(
-            "static void interrupt_socket", 1)[0]
+            "static void request_cancel", 1)[0]
         parsing += "static bool valid_id" + source.split("static bool valid_id", 1)[1].split(
             "static int hash_file", 1)[0]
         handlers = "static int configure_network" + source.split("static int configure_network", 1)[1].split(

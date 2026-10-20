@@ -11,8 +11,10 @@ first request's mode. GSTAT adds `record_pending` (boolean) and `record_error`
 (the last deferred-start result, zero or negative errno). Wait for `recording:true`
 and obtain the actual session ID then. STOP can cancel a pending start. Upload
 resources are released before the queued recording starts; no concurrent capture
-and HTTPS is promised, and the blocking SDK connect path still needs latency
-validation. Stock builds retain their existing START/GSTAT responses.
+and HTTPS is promised. The upload thread owns a nonblocking TCP/mbedTLS stream
+and checks cancellation between short I/O waits; DNS, cryptographic work and
+audio startup still require end-to-end latency validation. Stock builds retain
+their existing START/GSTAT responses.
 > Read-only `AT+RES` and thread stack queries remain available during uploads
 > when `CLIP_RESOURCE_STATS` is enabled. This is an experimental build profile.
 
