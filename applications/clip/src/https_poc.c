@@ -112,6 +112,7 @@ bool https_poc_command_allowed(const char *name)
     if (!strcmp(name, "RES")) { return true; }
     if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETDIAG")) { return true; }
     if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETTRACE")) { return true; }
+    if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) && !strcmp(name, "NETTX")) { return true; }
     /* A deliberately small control surface also excludes deferred erase/reboot
      * commands which could outlive the AT handler and race a subsequent job. */
     if (https_poc_active()) {
