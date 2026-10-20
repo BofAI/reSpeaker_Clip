@@ -203,6 +203,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bind", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8443)
+    parser.add_argument("--clock-port", type=int, help="opt-in LAN SNTP port, e.g. 12345")
     parser.add_argument("--directory", type=Path, required=True)
     parser.add_argument("--device", default="clip-test")
     parser.add_argument("--token-file", type=Path, required=True)
@@ -218,11 +219,20 @@ def main():
     context.load_cert_chain(args.cert, args.key)
     server.socket = context.wrap_socket(server.socket, server_side=True,
                                        do_handshake_on_connect=False)
+    clock = None
+    if args.clock_port is not None:
+        import threading
+        from clock_server import ClockHandler, ClockServer
+        clock = ClockServer((args.bind, args.clock_port), ClockHandler)
+        threading.Thread(target=clock.serve_forever, daemon=True).start()
     print(f"HTTPS receiver listening on {args.bind}:{args.port}", flush=True)
     try:
         server.serve_forever()
     finally:
         server.server_close()
+        if clock is not None:
+            clock.shutdown()
+            clock.server_close()
 
 
 if __name__ == "__main__":

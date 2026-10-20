@@ -23,6 +23,13 @@ only `confirmed` means durably acknowledged bytes. See the
 HTTPS state while idle. It never changes phone sync flags; see
 [persistent upload state](https-upload-state.md). `UPLOAD?` also reports
 `state_error` for local metadata persistence failures.
+`UPLOADAUTO=on/off` enables/disables persistent idle scheduling; `UPLOADAUTO?`
+reports scheduling and backoff state. `UPLOADSAVE` saves the full current config,
+`UPLOADCLEAR` removes it, and `UPLOADCLOCK=host,port` selects the boot-time SNTP
+endpoint. `UPLOADLIST=0` starts a two-item cursor page; subsequent requests use
+the returned `next` value while `more` is true. These commands are USB-only.
+See [automatic upload](https-auto-upload.md) for provisioning, recording priority,
+time verification, failure recovery, and the precise meaning of uploaded state.
 > Read-only `AT+RES` and thread stack queries remain available during uploads
 > when `CLIP_RESOURCE_STATS` is enabled. This is an experimental build profile.
 

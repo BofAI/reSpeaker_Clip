@@ -37,7 +37,12 @@ static struct {
 
 /* Command registry */
 static struct {
+#ifdef CONFIG_CLIP_HTTPS_POC
+    /* HTTPS controls + diagnostics + stock commands exceed the original 40. */
+    const struct at_command *cmds[48];
+#else
     const struct at_command *cmds[40];
+#endif
     int count;
 } cmd_registry = { .count = 0 };
 
@@ -54,7 +59,7 @@ int at_server_register_cmd(const struct at_command *cmd)
         return -EINVAL;
     }
 
-    if (cmd_registry.count >= ARRAY_SIZE(cmd_registry.cmds)) {
+    if ((size_t)cmd_registry.count >= ARRAY_SIZE(cmd_registry.cmds)) {
         return -ENOMEM;
     }
 

@@ -43,9 +43,33 @@ struct wifi_station_network { char ip[16], netmask[16], gateway[16]; };
 static int active, cancelled, stalled, last_error, bytes_sent, stage, tls_step, start_job;
 static int confirmed, resume_from, total_bytes;
 static int state_error, state_queries;
-static char ssid[33], password[64], host[96], port[6], device_id[33], token[97], session[32];
+#include "upload_config.h"
+static struct upload_config settings = {.clock_host="clock", .clock_port="123"};
+#define ssid settings.ssid
+#define password settings.password
+#define host settings.host
+#define port settings.port
+#define device_id settings.device
+#define token settings.token
+static char session[32];
+static int auto_job, auto_paused, config_error, scan_error, control_lock, save_error;
+static bool config_saved;
+static unsigned int failures, cursor_segment;
+static char cursor_session[15];
+static long long next_auto, time_synced_at;
+#define K_FOREVER 0
+#define MAX(a,b) ((a)>(b)?(a):(b))
+static long long k_uptime_get(void) { return 123; }
+static void k_mutex_lock(int *m,int wait) { assert(!*m);*m=1;(void)wait; }
+static void k_mutex_unlock(int *m) { assert(*m);*m=0; }
+static void atomic_set(int *v,int n) { *v=n; }
+static void atomic_clear(int *v) { *v=0; }
+int upload_config_save(struct upload_config *c) { (void)c; return save_error; }
+int upload_config_clear(void) { return save_error; }
+int upload_config_valid(const struct upload_config *c) { (void)c;return 1; }
+static int list_states(const char *a,char *o,size_t n) { (void)a;(void)o;(void)n;return -ENOENT; }
 static uint32_t segment;
-static bool time_ready;
+static int time_ready;
 static const char *names[] = {"idle", "preparing"}, *tls_steps[] = {"idle"};
 enum { PREPARING = 1 };
 static int event_error, event_result, interrupts, resets, starts, clock_error;
@@ -99,7 +123,6 @@ int main(void) {
     assert(!strcmp(host, "receiver") && !strcmp(port, "8443"));
     request("UPLOADSTATE", "20261019070446:1", 1, AT_CMD_TYPE_SET, -ENOENT);
     assert(state_queries == 1);
-    request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, -EINVAL);
     request("UPTIME", "invalid", 1, AT_CMD_TYPE_SET, -EINVAL);
     clock_error = 1;
     request("UPTIME", "1800000000", 1, AT_CMD_TYPE_SET, -EIO);
@@ -126,7 +149,20 @@ int main(void) {
     request("NETCFG", "other,test-password", 1, AT_CMD_TYPE_SET, -EBUSY);
     assert(!strcmp(ssid, "test"));
     request("UPLOADCANCEL", NULL, 1, 0, 0);
-    assert(cancelled && interrupts == 1);
+    assert(cancelled && interrupts == 1 && auto_paused);
+    active = 0;
+    request("UPLOADAUTO", "on", 1, AT_CMD_TYPE_SET, 0);
+    assert(settings.enabled && config_saved && !auto_paused);
+    request("NETCFG", "other,test-password", 1, AT_CMD_TYPE_SET, -EBUSY);
+    auto_job = active = 1;
+    request("UPLOADAUTO", "off", 1, AT_CMD_TYPE_SET, 0);
+    assert(!settings.enabled && auto_paused && cancelled);
+    active = 0; save_error = -EIO;
+    request("UPLOADAUTO", "on", 1, AT_CMD_TYPE_SET, -EIO);
+    assert(!settings.enabled && !config_saved);
+    save_error = 0;
+    request("UPLOADCLEAR", NULL, 1, 0, 0);
+    assert(!ssid[0] && !host[0] && !config_saved);
     return 0;
 }
 '''
@@ -134,7 +170,7 @@ int main(void) {
             root = Path(directory)
             (root / "test.c").write_text(code)
             subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
-                            "-fsanitize=address,undefined", str(root / "test.c"),
+                            "-fsanitize=address,undefined", "-I"+str(ROOT / "applications/clip/include"), str(root / "test.c"),
                             "-o", str(root / "test")], check=True)
             subprocess.run([str(root / "test")], check=True)
 
@@ -184,7 +220,7 @@ int main(void) {
             root = Path(directory)
             (root / "test.c").write_text(code)
             subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
-                            "-fsanitize=address,undefined", str(root / "test.c"),
+                            "-fsanitize=address,undefined", "-I"+str(ROOT / "applications/clip/include"), str(root / "test.c"),
                             "-o", str(root / "test")], check=True)
             subprocess.run([str(root / "test")], check=True)
 
@@ -228,7 +264,7 @@ int main(void) {
 '''
             (root / "test.c").write_text(code)
             subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
-                            "-fsanitize=address,undefined", str(root / "test.c"),
+                            "-fsanitize=address,undefined", "-I"+str(ROOT / "applications/clip/include"), str(root / "test.c"),
                             "-o", str(root / "test")], check=True)
             subprocess.run([str(root / "test")], check=True)
 

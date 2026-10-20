@@ -1,6 +1,7 @@
-/* Single-job HTTPS experiment. No local deletion or persistent credentials. */
+/* Serial HTTPS uploader: recording priority, durable state and opt-in idle scheduling. */
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/net/sntp.h>
 #include <zephyr/net/http/parser.h>
 #include <zephyr/data/json.h>
 #include <zephyr/fs/fs.h>
@@ -12,8 +13,11 @@
 #include <string.h>
 #include <ctype.h>
 #include "https_poc.h"
+#include "config.h"
 #include "https_stream.h"
 #include "upload_state.h"
+#include "upload_config.h"
+#include "upload_scan.h"
 #include "wifi_diag.h"
 #include "wifi_trace.h"
 #include "at_server.h"
@@ -44,10 +48,25 @@ static atomic_t tls_step;
 static const char *const tls_steps[] = {"idle", "resolve", "socket", "certificate",
     "peer_verify", "hostname", "send_timeout", "receive_timeout", "handshake", "http"};
 static K_SEM_DEFINE(start_job, 0, 1);
-static char ssid[33], password[64], host[96], port[6], device_id[33], token[97];
+static struct upload_config *configuration;
+#define settings (*configuration)
+#define ssid settings.ssid
+#define password settings.password
+#define host settings.host
+#define port settings.port
+#define device_id settings.device
+#define token settings.token
+static K_MUTEX_DEFINE(control_lock);
+static atomic_t initialized, auto_job, auto_paused, activity;
+static int config_error, scan_error;
+static bool config_saved;
+static uint32_t failures, cursor_segment;
+static char cursor_session[15];
+static int64_t next_auto, time_synced_at;
+static atomic_val_t observed_activity;
 static char session[32];
 static uint32_t segment;
-static bool time_ready;
+static atomic_t time_ready;
 static int64_t deadline;
 static struct fs_file_t file;
 /* Allocate only during a job, from the same heap as TLS. This saves static
@@ -120,7 +139,7 @@ bool https_poc_command_allowed(const char *name)
     /* A deliberately small control surface also excludes deferred erase/reboot
      * commands which could outlive the AT handler and race a subsequent job. */
     if (https_poc_active() || https_poc_record_pending()) {
-        return !strcmp(name, "UPLOAD") || !strcmp(name, "UPLOADCANCEL") ||
+        return !strcmp(name, "UPLOAD") || !strcmp(name, "UPLOADCANCEL") || !strcmp(name, "UPLOADAUTO") ||
                !strcmp(name, "START") || !strcmp(name, "STOP") ||
                !strcmp(name, "GSTAT") || !strcmp(name, "BATT") || !strcmp(name, "VERSION");
     }
@@ -130,7 +149,9 @@ bool https_poc_command_allowed(const char *name)
            !strcmp(name, "GSTAT") || !strcmp(name, "BATT") ||
            !strcmp(name, "VERSION") || !strcmp(name, "LIST") ||
            !strcmp(name, "START") || !strcmp(name, "STOP") ||
-           !strcmp(name, "UPLOADSTATE") ||
+           !strcmp(name, "UPLOADSTATE") || !strcmp(name, "UPLOADLIST") ||
+           !strcmp(name, "UPLOADAUTO") || !strcmp(name, "UPLOADSAVE") ||
+           !strcmp(name, "UPLOADCLEAR") || !strcmp(name, "UPLOADCLOCK") ||
            !strcmp(name, "TIME") || !strcmp(name, "STORAGE");
 }
 
@@ -139,6 +160,8 @@ bool https_poc_event(enum clip_event event, struct clip_event_result_info *resul
 {
     enum clip_event_result ret = CLIP_EVENT_OK;
     int error = 0;
+    if (event == CLIP_EVENT_START || event == CLIP_EVENT_STOP) { atomic_inc(&activity); }
+    if (event == CLIP_EVENT_POWER_OFF_EXEC) { atomic_set(&auto_paused, 1); }
     if (event == CLIP_EVENT_UPLOAD_BEGIN) {
         if (!device_idle || https_poc_record_pending() || !atomic_cas(&active, 0, 1)) {
             ret = CLIP_EVENT_BUSY;
@@ -475,11 +498,202 @@ static int state_query(const char *args, char *response, size_t length)
         loaded == -EBADMSG ? loaded : 0, hash);
 }
 
+/* Lexicographic cursor gives every pending file a turn, including after a
+ * per-file failure. Every pass sees newly added files; there is no fixed queue cap. */
+struct candidate { char session[15]; uint32_t segment; };
+struct selection { struct candidate first, after; uint8_t destination[32]; };
+static int compare_key(const char *a, uint32_t an, const char *b, uint32_t bn)
+{
+    int ret = strcmp(a, b);
+    return ret ? ret : an < bn ? -1 : an > bn ? 1 : 0;
+}
+static int choose_visit(const char *id, uint32_t number, uint32_t size, bool sealed, void *context)
+{
+    struct selection *selection = context;
+    if (!sealed || !size || size > MAX_FILE) { return 0; }
+    struct upload_file_record record;
+    int ret = upload_state_load(id, number, &record);
+    if (ret && ret != -ENOENT && ret != -EBADMSG) { return ret; }
+    if (!ret && record.state == UPLOAD_STORED && record.size == size &&
+        !memcmp(record.destination_sha256, selection->destination, 32)) { return 0; }
+    if (!selection->first.session[0] ||
+        compare_key(id, number, selection->first.session, selection->first.segment) < 0) {
+        strcpy(selection->first.session, id); selection->first.segment = number;
+    }
+    if (compare_key(id, number, cursor_session, cursor_segment) > 0 &&
+        (!selection->after.session[0] ||
+         compare_key(id, number, selection->after.session, selection->after.segment) < 0)) {
+        strcpy(selection->after.session, id); selection->after.segment = number;
+    }
+    return 0;
+}
+static int begin_auto(void)
+{
+    int selected = 0;
+    k_mutex_lock(&control_lock, K_FOREVER);
+    atomic_val_t generation = atomic_get(&activity);
+    if (generation != observed_activity) {
+        observed_activity = generation; next_auto = k_uptime_get() + 5000;
+    }
+    if (!atomic_get(&initialized) || !settings.enabled || atomic_get(&auto_paused) ||
+        !upload_config_valid(&settings) || k_uptime_get() < next_auto) { goto done; }
+    struct clip_event_result_info result;
+    if (clip_post_event_sync(CLIP_EVENT_UPLOAD_BEGIN, &result) || result.result != CLIP_EVENT_OK) {
+        goto done;
+    }
+    deadline = k_uptime_get() + 300000;
+    struct selection selection = {0};
+    int ret = destination_digest(selection.destination);
+    if (!ret) { ret = upload_scan(choose_visit, &selection, check_cancel); }
+    scan_error = ret;
+    struct candidate *next = selection.after.session[0] ? &selection.after : &selection.first;
+    if (!ret && next->session[0]) {
+        strcpy(session, next->session); segment = next->segment;
+        strcpy(cursor_session, session); cursor_segment = segment;
+        atomic_set(&auto_job, 1); wifi_diag_reset(); selected = 1;
+    } else {
+        atomic_set(&stage, ret == -ECANCELED ? CANCELLED : ret ? FAILED : IDLE);
+        atomic_set(&last_error, ret);
+        /* STOP/new recordings wake us sooner. Avoid keeping an empty SD awake
+         * with scans almost as frequent as its 45-second idle power timeout. */
+        next_auto = k_uptime_get() + (ret ? 30000 : 300000);
+        if (ret && ret != -ECANCELED) { atomic_set(&cleanup_error, ret); }
+        while (clip_post_event_sync(CLIP_EVENT_UPLOAD_END, &result)) { k_sleep(K_MSEC(10)); }
+    }
+done:
+    k_mutex_unlock(&control_lock);
+    return selected;
+}
+
+/* Two records per page keep the response below the existing AT buffer limit.
+ * Re-scan after the last key instead of exposing FAT enumeration positions. */
+struct list_item { struct candidate key; uint32_t size; bool sealed; };
+struct list_selection { struct candidate cursor; struct list_item items[3]; };
+static int list_visit(const char *id, uint32_t number, uint32_t size, bool sealed, void *context)
+{
+    struct list_selection *s = context;
+    if (compare_key(id, number, s->cursor.session, s->cursor.segment) <= 0) { return 0; }
+    for (unsigned int i = 0; i < ARRAY_SIZE(s->items); i++) {
+        struct list_item *item = &s->items[i];
+        if (item->key.session[0] && !compare_key(id, number, item->key.session, item->key.segment)) {
+            return 0;
+        }
+        if (!item->key.session[0] || compare_key(id, number, item->key.session, item->key.segment) < 0) {
+            for (unsigned int j = ARRAY_SIZE(s->items) - 1; j > i; j--) { s->items[j] = s->items[j - 1]; }
+            strcpy(item->key.session, id); item->key.segment = number;
+            item->size = size; item->sealed = sealed; break;
+        }
+    }
+    return 0;
+}
+static int list_check(void) { return 0; }
+static int list_states(const char *args, char *response, size_t length)
+{
+    if (clip_event_get_state() != CLIP_STATE_IDLE) { return -EBUSY; }
+    struct list_selection selection = {0};
+    if (strcmp(args, "0")) {
+        char key[32];
+        if (strlen(args) >= sizeof(key)) { return -EINVAL; }
+        strcpy(key, args); char *colon = strchr(key, ':');
+        if (!colon) { return -EINVAL; }
+        *colon++ = 0; char *end;
+        unsigned long n = strtoul(colon, &end, 10);
+        if (!valid_session(key) || !*colon || *end || !n || n > 999999999) { return -EINVAL; }
+        strcpy(selection.cursor.session, key); selection.cursor.segment = n;
+    }
+    uint8_t destination[32];
+    int ret = destination_digest(destination);
+    if (!ret) {
+        ret = upload_scan_after(list_visit, &selection, list_check,
+                                selection.cursor.session[0] ? selection.cursor.session : NULL);
+    }
+    if (ret) { return ret; }
+    size_t used = snprintf(response, length, "{\"ok\":true,\"data\":{\"items\":[");
+    if (used >= length) { return -ENOSPC; }
+    for (unsigned int i = 0; i < 2 && selection.items[i].key.session[0]; i++) {
+        struct list_item *item = &selection.items[i];
+        struct upload_file_record record;
+        int loaded = upload_state_load(item->key.session, item->key.segment, &record);
+        if (loaded && loaded != -ENOENT && loaded != -EBADMSG) { return loaded; }
+        bool match = !loaded && record.size == item->size &&
+                     !memcmp(record.destination_sha256, destination, sizeof(destination));
+        bool eligible = item->sealed && item->size && item->size <= MAX_FILE;
+        int n = snprintf(response + used, length - used,
+            "%s{\"session\":\"%s\",\"segment\":%u,\"state\":\"%s\",\"size\":%u,"
+            "\"confirmed\":%u,\"eligible\":%s,\"state_error\":%d}", i ? "," : "",
+            item->key.session, (unsigned int)item->key.segment,
+            upload_state_name(match ? record.state : UPLOAD_PENDING), (unsigned int)item->size,
+            match ? (unsigned int)record.confirmed : 0, eligible ? "true" : "false",
+            loaded == -EBADMSG ? loaded : 0);
+        if (n < 0 || (size_t)n >= length - used) { return -ENOSPC; }
+        used += n; selection.cursor = item->key;
+    }
+    int n = snprintf(response + used, length - used, "],\"more\":%s,\"next\":\"%s:%u\"}}\n",
+        selection.items[2].key.session[0] ? "true" : "false",
+        selection.cursor.session, (unsigned int)selection.cursor.segment);
+    return n < 0 || (size_t)n >= length - used ? -ENOSPC : (int)(used + n);
+}
+
+/* SNTP supplies wall time after boot, never a persisted timestamp pretending to
+ * include powered-off time. Replies are not authenticated; TLS chain, hostname
+ * and validity checks stay mandatory. DNS retains its SDK 5-second budget. */
+static int sync_upload_time(void)
+{
+    if (atomic_get(&time_ready) && k_uptime_get() - time_synced_at < 6 * 60 * 60 * 1000) { return 0; }
+    atomic_clear(&time_ready);
+    struct zsock_addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM};
+    struct zsock_addrinfo *addresses = NULL;
+    int ret = zsock_getaddrinfo(settings.clock_host, settings.clock_port, &hints, &addresses);
+    if (ret) { return -EHOSTUNREACH; }
+    ret = check_cancel();
+    struct sntp_ctx clock;
+    bool opened = false;
+    if (!ret) {
+        ret = sntp_init(&clock, addresses->ai_addr, addresses->ai_addrlen);
+        opened = ret == 0;
+    }
+    zsock_freeaddrinfo(addresses);
+    struct sntp_time now;
+    int64_t end = k_uptime_get() + 5000;
+    if (!ret) {
+        ret = sntp_query(&clock, 50, &now);
+        while (ret == -ETIMEDOUT && k_uptime_get() < end) {
+            ret = check_cancel();
+            if (ret) { break; }
+            ret = sntp_recv_response(&clock, 50, &now);
+        }
+    }
+    if (opened) { sntp_close(&clock); }
+    if (!ret && (now.seconds < 1700000000ULL || now.seconds > 4102444800ULL)) { ret = -ERANGE; }
+    if (!ret) {
+        struct timespec ts = {.tv_sec = now.seconds, .tv_nsec = 0};
+        ret = clock_settime(CLOCK_REALTIME, &ts) ? -errno : 0;
+        if (!ret) { ret = config_set_time(now.seconds); }
+        if (!ret) { atomic_set(&time_ready, 1); time_synced_at = k_uptime_get(); }
+    }
+    return ret ? ret : check_cancel();
+}
+
+static void schedule_after_job(int ret)
+{
+        k_mutex_lock(&control_lock, K_FOREVER);
+        if (atomic_get(&auto_job)) {
+            if (!ret) { failures = 0; next_auto = k_uptime_get() + 5000; }
+            else if (ret == -ECANCELED) { next_auto = k_uptime_get() + 5000; }
+            else {
+                failures = MIN(failures + 1, 5U);
+                next_auto = k_uptime_get() + MIN(300000U, 20000U << (failures - 1));
+            }
+        }
+        atomic_clear(&auto_job);
+        k_mutex_unlock(&control_lock);
+}
+
 static void worker(void *a, void *b, void *c)
 {
     ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
     for (;;) {
-        k_sem_take(&start_job, K_FOREVER);
+        if (k_sem_take(&start_job, K_SECONDS(1)) && !begin_auto()) { continue; }
         atomic_set(&tls_step, TLS_SETUP_IDLE);
         deadline = k_uptime_get() + 300000;
         atomic_set(&stage, PREPARING);
@@ -511,10 +725,12 @@ static void worker(void *a, void *b, void *c)
                 atomic_set(&state_error, ret);
             }
         }
+        if (!ret) { ret = check_cancel(); }
         if (!ret) {
             atomic_set(&stage, CONNECTING);
             ret = wifi_station_connect(ssid, password, &cancelled);
         }
+        if (!ret) { ret = sync_upload_time(); }
         if (!ret) {
             atomic_set(&stage, TLS);
             ret = tls_connect(&stream);
@@ -550,6 +766,7 @@ static void worker(void *a, void *b, void *c)
         }
         atomic_set(&last_error, ret);
         atomic_set(&stage, ret == -ECANCELED ? CANCELLED : ret ? FAILED : SUCCEEDED);
+        schedule_after_job(ret);
         struct clip_event_result_info result;
         /* A temporarily full event queue must not strand the storage claim. */
         while (clip_post_event_sync(CLIP_EVENT_UPLOAD_END, &result)) {
@@ -602,7 +819,8 @@ static int set_upload_time(const char *args)
     if (*end || timestamp < 1700000000LL || timestamp > 4102444800LL) { return -EINVAL; }
     struct timespec ts = {.tv_sec = timestamp, .tv_nsec = 0};
     int ret = clock_settime(CLOCK_REALTIME, &ts) ? -errno : 0;
-    time_ready = ret == 0;
+    atomic_set(&time_ready, ret == 0);
+    if (!ret) { time_synced_at = k_uptime_get(); }
     return ret;
 }
 
@@ -614,10 +832,11 @@ static int start_upload(char *args)
     char *end;
     unsigned long n = strtoul(split, &end, 10);
     if (!valid_session(args) || !*split || *end || !n || n > 999999999 ||
-        !ssid[0] || !host[0] || !time_ready) { return -EINVAL; }
+        !ssid[0] || !host[0]) { return -EINVAL; }
     struct clip_event_result_info result;
     int ret = clip_post_event_sync(CLIP_EVENT_UPLOAD_BEGIN, &result);
     if (ret || result.result != CLIP_EVENT_OK) { return -EBUSY; }
+    atomic_clear(&auto_job);
     strcpy(session, args);
     segment = n;
     wifi_diag_reset();
@@ -625,27 +844,84 @@ static int start_upload(char *args)
     return 0;
 }
 
-static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
+static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
 {
     int ret = 0;
     char args[256] = {0};
     if (ctx->transport_type != TRANSPORT_TYPE_USB) { ret = -EACCES; goto reply; }
     if (!strcmp(ctx->name, "UPLOAD") && ctx->type != AT_CMD_TYPE_SET) { goto reply; }
+    if (!strcmp(ctx->name, "UPLOADAUTO") && ctx->type != AT_CMD_TYPE_SET) {
+        return snprintf(response, length,
+            "{\"ok\":true,\"data\":{\"enabled\":%s,\"paused\":%s,\"config_saved\":%s,"
+            "\"config_error\":%d,\"scan_error\":%d,\"time_ready\":%s,\"auto_active\":%s,"
+            "\"failures\":%u,\"next_attempt_ms\":%u}}\n",
+            settings.enabled ? "true" : "false", atomic_get(&auto_paused) ? "true" : "false",
+            config_saved ? "true" : "false", config_error, scan_error,
+            atomic_get(&time_ready) ? "true" : "false", atomic_get(&auto_job) ? "true" : "false",
+            (unsigned int)failures, (unsigned int)MAX(0, next_auto - k_uptime_get()));
+    }
+    if (!strcmp(ctx->name, "UPLOADAUTO") && ctx->args && !strcmp(ctx->args, "off")) {
+        settings.enabled = 0; atomic_set(&auto_paused, 1);
+        if (atomic_get(&auto_job)) { request_cancel(); }
+        ret = upload_config_save(&settings); config_error = ret; config_saved = ret == 0;
+        goto reply;
+    }
     if (!strcmp(ctx->name, "UPLOADCANCEL")) {
-        request_cancel(); goto reply;
+        atomic_set(&auto_paused, 1); request_cancel(); goto reply;
     }
     if (https_poc_active() || https_poc_record_pending()) { ret = -EBUSY; goto reply; }
+    if (!strcmp(ctx->name, "UPLOADSAVE")) {
+        ret = upload_config_save(&settings); config_error = ret; config_saved = ret == 0; goto reply;
+    }
+    if (!strcmp(ctx->name, "UPLOADCLEAR")) {
+        atomic_set(&auto_paused, 1); settings.enabled = 0;
+        ret = upload_config_clear(); config_error = ret; config_saved = false;
+        if (!ret) {
+            memset(&settings, 0, sizeof(settings));
+            strcpy(settings.clock_host, "time.cloudflare.com"); strcpy(settings.clock_port, "123");
+            cursor_session[0] = 0; cursor_segment = 0; atomic_clear(&time_ready);
+        }
+        goto reply;
+    }
     if (!ctx->args) { ret = -EINVAL; goto reply; }
     if (strlen(ctx->args) >= sizeof(args)) { ret = -EINVAL; goto reply; }
     strcpy(args, ctx->args);
-    if (!strcmp(ctx->name, "NETCFG")) {
-        ret = configure_network(args);
+    if ((!strcmp(ctx->name, "NETCFG") || !strcmp(ctx->name, "UPLOADCFG") ||
+         !strcmp(ctx->name, "UPLOADCLOCK")) && settings.enabled) { ret = -EBUSY; goto reply; }
+    if (!strcmp(ctx->name, "UPLOADAUTO")) {
+        if (strcmp(args, "on")) { ret = -EINVAL; goto reply; }
+        settings.enabled = 1; ret = upload_config_save(&settings); config_error = ret;
+        if (ret) { settings.enabled = 0; config_saved = false; }
+        else {
+            config_saved = true; atomic_clear(&auto_paused); failures = 0;
+            next_auto = k_uptime_get() + 5000; cursor_session[0] = 0; cursor_segment = 0;
+        }
+    } else if (!strcmp(ctx->name, "UPLOADCLOCK")) {
+        char *split = strchr(args, ',');
+        if (!split) { ret = -EINVAL; goto reply; }
+        *split++ = 0;
+        struct upload_config candidate = settings;
+        if (strlen(args) >= sizeof(candidate.clock_host) || strlen(split) >= sizeof(candidate.clock_port)) {
+            ret = -EINVAL; goto reply;
+        }
+        strcpy(candidate.clock_host, args); strcpy(candidate.clock_port, split);
+        if (!upload_config_valid(&candidate)) { ret = -EINVAL; }
+        else {
+            strcpy(settings.clock_host, args); strcpy(settings.clock_port, split);
+            config_saved = false; atomic_clear(&time_ready);
+        }
+        memset(&candidate, 0, sizeof(candidate));
+    } else if (!strcmp(ctx->name, "NETCFG")) {
+        ret = configure_network(args); if (!ret) { config_saved = false; }
     } else if (!strcmp(ctx->name, "UPLOADCFG")) {
-        ret = configure_receiver(args);
+        ret = configure_receiver(args); if (!ret) { config_saved = false; }
     } else if (!strcmp(ctx->name, "UPTIME")) {
         ret = set_upload_time(args);
     } else if (!strcmp(ctx->name, "UPLOAD")) {
         ret = start_upload(args);
+    } else if (!strcmp(ctx->name, "UPLOADLIST")) {
+        ret = list_states(args, response, length);
+        if (ret >= 0) { memset(args, 0, sizeof(args)); return ret; }
     } else if (!strcmp(ctx->name, "UPLOADSTATE")) {
         ret = state_query(args, response, length);
         if (ret >= 0) { memset(args, 0, sizeof(args)); return ret; }
@@ -664,18 +940,38 @@ reply:
         network.ip, network.netmask, network.gateway);
 }
 
+static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
+{
+    k_mutex_lock(&control_lock, K_FOREVER);
+    int ret = command_locked(ctx, response, length);
+    k_mutex_unlock(&control_lock);
+    return ret;
+}
+
 int https_poc_register(void)
 {
+    configuration = k_calloc(1, sizeof(*configuration));
+    if (!configuration) { return -ENOMEM; }
     int ret;
     static const struct at_command commands[] = {
         {"NETCFG", AT_CMD_SET, command}, {"UPLOADCFG", AT_CMD_SET, command},
         {"UPTIME", AT_CMD_SET, command}, {"UPLOAD", AT_CMD_SET | AT_CMD_QUERY, command},
         {"UPLOADCANCEL", AT_CMD_EXEC, command},
-        {"UPLOADSTATE", AT_CMD_SET, command},
+        {"UPLOADSTATE", AT_CMD_SET, command}, {"UPLOADLIST", AT_CMD_SET, command},
+        {"UPLOADAUTO", AT_CMD_SET | AT_CMD_QUERY, command},
+        {"UPLOADSAVE", AT_CMD_EXEC, command}, {"UPLOADCLEAR", AT_CMD_EXEC, command},
+        {"UPLOADCLOCK", AT_CMD_SET, command},
     };
     for (size_t i = 0; i < ARRAY_SIZE(commands); i++) {
         ret = at_server_register_cmd(&commands[i]);
         if (ret) { return ret; }
     }
+    ret = upload_config_init(&settings);
+    config_error = ret; config_saved = !ret && ssid[0];
+    if (!settings.clock_host[0]) {
+        strcpy(settings.clock_host, "time.cloudflare.com"); strcpy(settings.clock_port, "123");
+    }
+    next_auto = k_uptime_get() + 10000;
+    atomic_set(&initialized, 1);
     return wifi_diag_register();
 }

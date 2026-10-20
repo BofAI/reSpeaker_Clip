@@ -83,7 +83,7 @@ static int fs_close(struct fs_file_t *f) {
         poc = (ROOT / "applications/clip/src/https_poc.c").read_text()
         for signature, following in (("static bool valid_session", "static int hash_file_range"),
                                      ("static void digest_text", "static void digest_bytes"),
-                                     ("static int state_query", "static void worker")):
+                                     ("static int state_query", "/* Lexicographic cursor")):
             code += signature + poc.split(signature, 1)[1].split(following, 1)[0]
         code += r'''
 static void raw_record(const char *suffix,struct upload_file_record *r) {

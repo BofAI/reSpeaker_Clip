@@ -56,18 +56,18 @@ struct clip_event_result_info { enum clip_event_result result; int error_code; }
 struct clip_event_item { enum clip_event event; struct clip_event_result_info *result; int *done_sem; };
 static int active, cancelled, stalled, last_error, bytes_sent, stage, record_pending, record_error, cleanup_error;
 static int confirmed, resume_from, total_bytes;
-static int state_error;
+static int state_error, auto_job, auto_paused, activity;
 static int start_job, g_state, clip_ev_msgq, ota_in_progress;
 static bool audio_active, resources_released, inject_start;
 static int interrupts, record_starts, started_jobs;
 static enum clip_event_result recording_result = CLIP_EVENT_OK;
 static char ssid[33] = "fixture", host[96] = "receiver", session[32];
 static unsigned int segment;
-static bool time_ready = true;
 enum { PREPARING = 1 };
 static struct clip_event_item queue[4];
 static unsigned int queued, consumed;
 static uint8_t transition_table[3][CLIP_EVENT_COUNT];
+static void atomic_inc(int *v) { (*v)++; }
 static int atomic_get(int *v) { return *v; }
 static void atomic_set(int *v, int n) { *v = n; }
 static void atomic_clear(int *v) { *v = 0; }

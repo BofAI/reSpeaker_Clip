@@ -12,6 +12,9 @@
 > this does not add an SDK automatic-upload queue.
 > [Persistent HTTPS state](../docs/https-upload-state.md) is queried separately
 > with `UPLOADSTATE`; it does not reuse the SDK's phone synchronization fields.
+> [Idle automatic upload](../docs/https-auto-upload.md) is configured through USB
+> `UPLOADAUTO`, `UPLOADSAVE`, `UPLOADCLEAR`, and `UPLOADCLOCK`; `UPLOADLIST`
+> provides cursor pages. Scheduling runs in firmware, independently of the SDK.
 
 The new Python SDK for the current reSpeaker Clip firmware.  It is intentionally
 independent from `applications/clip/tests`: that directory remains the legacy
