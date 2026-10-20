@@ -22,7 +22,7 @@ class PreemptionTest(unittest.TestCase):
             "bool https_poc_command_allowed", 1)[0]
         gate = "bool https_poc_event" + source.split("bool https_poc_event", 1)[1].split(
             "static int check_cancel", 1)[0]
-        valid = "static bool valid_id" + source.split("static bool valid_id", 1)[1].split(
+        valid = "static bool valid_session" + source.split("static bool valid_session", 1)[1].split(
             "static int hash_file", 1)[0]
         start = "static int start_upload" + source.split("static int start_upload", 1)[1].split(
             "static int command", 1)[0]
@@ -55,6 +55,7 @@ enum clip_state { CLIP_STATE_IDLE, CLIP_STATE_RECORDING, CLIP_STATE_WIFI_SYNC };
 struct clip_event_result_info { enum clip_event_result result; int error_code; };
 struct clip_event_item { enum clip_event event; struct clip_event_result_info *result; int *done_sem; };
 static int active, cancelled, stalled, last_error, bytes_sent, stage, record_pending, record_error, cleanup_error;
+static int confirmed, resume_from, total_bytes;
 static int start_job, g_state, clip_ev_msgq, ota_in_progress;
 static bool audio_active, resources_released, inject_start;
 static int interrupts, record_starts, started_jobs;

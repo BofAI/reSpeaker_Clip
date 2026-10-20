@@ -41,6 +41,7 @@ struct at_cmd_ctx { int transport_type, type; const char *name, *args; };
 struct clip_event_result_info { int result; };
 struct wifi_station_network { char ip[16], netmask[16], gateway[16]; };
 static int active, cancelled, stalled, last_error, bytes_sent, stage, tls_step, start_job;
+static int confirmed, resume_from, total_bytes;
 static char ssid[33], password[64], host[96], port[6], device_id[33], token[97], session[32];
 static uint32_t segment;
 static bool time_ready;
@@ -101,6 +102,8 @@ int main(void) {
     request("UPTIME", "1800000000", 1, AT_CMD_TYPE_SET, 0);
     assert(time_ready && wall_time == 1800000000LL);
     request("UPLOAD", "20261019070446:0", 1, AT_CMD_TYPE_SET, -EINVAL);
+    request("UPLOAD", "session:1", 1, AT_CMD_TYPE_SET, -EINVAL);
+    request("UPLOAD", "2026101907044x:1", 1, AT_CMD_TYPE_SET, -EINVAL);
     event_error = -EIO;
     request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, -EBUSY);
     event_error = 0; event_result = 1;

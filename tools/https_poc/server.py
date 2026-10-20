@@ -10,9 +10,10 @@ import ssl
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from resume_store import MAX_CHUNK, MAX_FILE, ResumeError, ResumeStore
 
-MAX_FILE = 8 * 1024 * 1024
 ROUTE = re.compile(r"/v1/devices/([A-Za-z0-9_-]{1,32})/recordings/([A-Za-z0-9_-]{1,31})/([1-9][0-9]{0,8})\Z")
+RESUME_ROUTE = re.compile(r"/v2/devices/([A-Za-z0-9_-]{1,32})/recordings/([0-9]{14})/([1-9][0-9]{0,8})\Z")
 
 
 class Receiver(ThreadingHTTPServer):
@@ -24,6 +25,7 @@ class Receiver(ThreadingHTTPServer):
         self.directory.mkdir(parents=True, exist_ok=True)
         self.device, self.token = device, token
         self.commit_lock = threading.Lock()
+        self.resume = ResumeStore(self.directory, self.commit_lock)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -57,9 +59,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Connection", "close")
+        keep_alive = (self.path.startswith("/v2/") and
+                      getattr(self, "resume_connection", False) and code in (200, 201)
+                      and payload.get("status") != "stored")
+        self.send_header("Connection", "keep-alive" if keep_alive else "close")
         self.end_headers()
-        self.close_connection = True
+        self.close_connection = not keep_alive
         self.wfile.write(body)
 
     def authorized(self):
@@ -69,6 +74,8 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def do_GET(self):
+        if self.path.startswith("/v2/"):
+            return self.resume_request(write=False)
         if not self.authorized():
             self.reply(401, {"error": "unauthorized"})
         elif self.path == "/healthz":
@@ -77,6 +84,8 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404, {"error": "not_found"})
 
     def do_PUT(self):
+        if self.path.startswith("/v2/"):
+            return self.resume_request(write=True)
         temp_path = None
         try:
             match = ROUTE.fullmatch(self.path)
@@ -143,6 +152,51 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             if temp_path is not None:
                 temp_path.unlink(missing_ok=True)
+
+    def resume_request(self, write):
+        try:
+            if not self.authorized():
+                return self.reply(401, {"error": "unauthorized"})
+            match = RESUME_ROUTE.fullmatch(self.path)
+            if not match or match[1] != self.server.device:
+                return self.reply(403, {"error": "invalid_identity_or_path"})
+
+            def header(name, pattern):
+                values = self.headers.get_all(name, [])
+                if len(values) != 1 or not re.fullmatch(pattern, values[0]):
+                    raise ResumeError(400, "invalid_headers")
+                return values[0]
+
+            if self.headers.get("Transfer-Encoding") is not None:
+                raise ResumeError(400, "invalid_headers")
+            size = int(header("X-Recording-Size", r"[1-9][0-9]{0,7}"))
+            if size > MAX_FILE:
+                raise ResumeError(413, "size_limit")
+            digest = header("X-Content-SHA256", r"[0-9a-f]{64}")
+            object_id = hashlib.sha256("/".join(match.groups()).encode()).hexdigest()
+            self.resume_connection = True
+            if not write:
+                if self.headers.get_all("Content-Length", []) not in ([], ["0"]):
+                    raise ResumeError(400, "invalid_headers")
+                return self.reply(200, self.server.resume.status(object_id, size, digest))
+            length = int(header("Content-Length", r"[1-9][0-9]{0,4}"))
+            offset = int(header("Upload-Offset", r"0|[1-9][0-9]{0,7}"))
+            chunk_hash = header("X-Chunk-SHA256", r"[0-9a-f]{64}")
+            if length > MAX_CHUNK or offset + length > size:
+                raise ResumeError(400, "invalid_chunk")
+            data = self.rfile.read(length)
+            if len(data) != length:
+                raise ResumeError(400, "truncated_chunk")
+            code, receipt = self.server.resume.commit(object_id, size, digest, offset, data, chunk_hash)
+            self.reply(code, receipt)
+        except ResumeError as error:
+            self.reply(error.code, error.payload)
+        except (OSError, ValueError):
+            self.close_connection = True
+            try:
+                self.reply(500, {"error": "io_failure"})
+            except OSError:
+                pass
 
 
 def main():

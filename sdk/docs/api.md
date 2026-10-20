@@ -98,4 +98,5 @@ contains the last deferred-start result (zero or negative errno). Only
 requests coalesce without changing the pending mode. `stop_recording()` cancels a
 pending start. Stock status responses default these optional fields to `False`
 and `0`. TLS connect remains potentially blocking, so start latency still needs
-hardware validation. This does not enable automatic upload or resumable transfer.
+hardware validation. This recording API does not schedule uploads; the separate
+USB HTTPS tools implement the [v2 resumable protocol](../../docs/https-resume-v2.md).

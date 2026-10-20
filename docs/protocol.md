@@ -15,6 +15,10 @@ and HTTPS is promised. The upload thread owns a nonblocking TCP/mbedTLS stream
 and checks cancellation between short I/O waits; DNS, cryptographic work and
 audio startup still require end-to-end latency validation. Stock builds retain
 their existing START/GSTAT responses.
+The experimental USB `UPLOAD` status includes `protocol:2`, `size`, `sent`,
+`confirmed` and `resume_from`. The server checkpoint is queried on every job;
+only `confirmed` means durably acknowledged bytes. See the
+[resumable upload contract](https-resume-v2.md) for identities and recovery.
 > Read-only `AT+RES` and thread stack queries remain available during uploads
 > when `CLIP_RESOURCE_STATS` is enabled. This is an experimental build profile.
 

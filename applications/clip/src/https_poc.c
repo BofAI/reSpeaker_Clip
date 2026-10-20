@@ -25,12 +25,14 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_PSA_WANT_ALG_ECDSA) &&
              IS_ENABLED(CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED),
              "The HTTPS experiment's EC test certificates require ECDHE-ECDSA support");
 #define MAX_FILE (8U * 1024U * 1024U)
+#define UPLOAD_CHUNK (16U * 1024U)
 #define CONNECT_BUDGET_MS (CONFIG_NET_SOCKETS_CONNECT_TIMEOUT + \
                            CONFIG_NET_SOCKETS_TLS_CONNECT_TIMEOUT)
 BUILD_ASSERT(CONFIG_NET_SOCKETS_CONNECT_TIMEOUT > 0 &&
              CONFIG_NET_SOCKETS_TLS_CONNECT_TIMEOUT > 0 && CONNECT_BUDGET_MS <= 30000,
              "HTTPS requires bounded TCP + TLS connection timeouts (at most 30 seconds)");
 static atomic_t active, cancelled, stage, last_error, bytes_sent;
+static atomic_t confirmed, resume_from, total_bytes;
 static atomic_t stalled;
 static atomic_t record_pending, record_error, cleanup_error;
 enum { TLS_SETUP_IDLE, TLS_SETUP_DNS, TLS_SETUP_SOCKET, TLS_SETUP_CERTIFICATE,
@@ -142,6 +144,7 @@ bool https_poc_event(enum clip_event event, struct clip_event_result_info *resul
              * erase a button cancellation arriving before the worker wakes. */
             atomic_clear(&cancelled); atomic_clear(&stalled);
             atomic_clear(&last_error); atomic_clear(&bytes_sent);
+            atomic_clear(&confirmed); atomic_clear(&resume_from); atomic_clear(&total_bytes);
             atomic_clear(&cleanup_error);
             atomic_set(&stage, PREPARING);
         }
@@ -191,17 +194,28 @@ static bool valid_id(const char *s, size_t max)
     return true;
 }
 
-static int hash_file(void)
+static bool valid_session(const char *s)
 {
+    if (strlen(s) != 14) { return false; }
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') { return false; }
+    }
+    return true;
+}
+
+static int hash_file_range(size_t offset, size_t length, char output[65])
+{
+    int ret = fs_seek(&file, offset, FS_SEEK_SET);
+    if (ret) { return ret; }
     mbedtls_sha256_context hash;
     uint8_t digest[32];
     mbedtls_sha256_init(&hash);
-    int ret = mbedtls_sha256_starts(&hash, 0);
+    ret = mbedtls_sha256_starts(&hash, 0);
     size_t total = 0;
-    while (!ret && total < file_length) {
+    while (!ret && total < length) {
         ret = check_cancel();
         if (ret) { break; }
-        ssize_t n = fs_read(&file, io, MIN(sizeof(io), file_length - total));
+        ssize_t n = fs_read(&file, io, MIN(sizeof(io), length - total));
         if (n <= 0) { ret = n < 0 ? (int)n : -EIO; break; }
         total += n;
         ret = mbedtls_sha256_update(&hash, io, n);
@@ -209,24 +223,26 @@ static int hash_file(void)
     if (!ret) { ret = mbedtls_sha256_finish(&hash, digest); }
     mbedtls_sha256_free(&hash);
     if (ret) { return ret; }
-    for (int i = 0; i < 32; i++) { snprintf(expected_hash + i * 2, 3, "%02x", digest[i]); }
-    return fs_seek(&file, 0, FS_SEEK_SET);
+    for (int i = 0; i < 32; i++) { snprintf(output + i * 2, 3, "%02x", digest[i]); }
+    return fs_seek(&file, offset, FS_SEEK_SET);
 }
 
-static int send_payload(struct https_stream *stream)
+static int hash_file(void) { return hash_file_range(0, file_length, expected_hash); }
+
+static int send_payload(struct https_stream *stream, size_t offset, size_t length)
 {
     size_t total = 0;
     atomic_set(&stage, SENDING);
-    while (total < file_length) {
+    while (total < length) {
         int ret = check_cancel();
         if (ret) { return ret; }
-        ssize_t n = fs_read(&file, io, MIN(sizeof(io), file_length - total));
+        ssize_t n = fs_read(&file, io, MIN(sizeof(io), length - total));
         if (n <= 0) { return n < 0 ? (int)n : -EIO; }
         ret = https_stream_write(stream, io, n);
         if (ret) { return ret; }
         total += n;
         progress();
-        atomic_set(&bytes_sent, total);
+        atomic_set(&bytes_sent, offset + total);
     }
     return (int)total;
 }
@@ -257,24 +273,22 @@ static int message_complete(struct http_parser *parser)
     return check_cancel();
 }
 
-static int upload(struct https_stream *stream)
+static int accept_receipt(const char *status, int size, const char *sha256,
+                           int offset, int expected_offset)
 {
-    int n = snprintf((char *)io, sizeof(io),
-        "PUT /v1/devices/%s/recordings/%s/%u HTTP/1.1\r\n"
-        "Host: %s:%s\r\nAuthorization: Bearer %s\r\n"
-        "X-Content-SHA256: %s\r\nConnection: close\r\n"
-        "Content-Type: application/octet-stream\r\nContent-Length: %u\r\n\r\n",
-        device_id, session, segment, host, port, token, expected_hash, (unsigned int)file_length);
-    if (n < 0 || (size_t)n >= sizeof(io)) { return -EMSGSIZE; }
-    progress();
-    int ret = https_stream_write(stream, io, n);
-    memset(io, 0, sizeof(io));
-    if (ret) { return ret; }
-    ret = send_payload(stream);
-    if (ret < 0) { return ret; }
+    if (size < 0 || (size_t)size != file_length || strcmp(sha256, expected_hash) || offset < 0 ||
+        (size_t)offset > file_length || (expected_offset >= 0 && offset != expected_offset) ||
+        (strcmp(status, "stored") && strcmp(status, "partial")) ||
+        (!strcmp(status, "stored") != ((size_t)offset == file_length))) { return -EBADMSG; }
+    atomic_set(&confirmed, offset);
+    return 0;
+}
+
+static int receive_receipt(struct https_stream *stream, int expected_offset)
+{
     struct http_parser parser;
     http_parser_init(&parser, HTTP_RESPONSE);
-    parser.method = HTTP_PUT;
+    parser.method = expected_offset < 0 ? HTTP_GET : HTTP_PUT;
     const struct http_parser_settings callbacks = {
         .on_header_field = header_fragment, .on_header_value = header_fragment,
         .on_body = body_fragment, .on_message_complete = message_complete,
@@ -287,23 +301,72 @@ static int upload(struct https_stream *stream)
         ssize_t count = https_stream_read(stream, recv_buffer, sizeof(recv_buffer));
         if (count < 0) { return count; }
         size_t used = http_parser_execute(&parser, &callbacks, (char *)recv_buffer, count);
-        ret = check_cancel();
+        int ret = check_cancel();
         if (ret) { return ret; }
         if (HTTP_PARSER_ERRNO(&parser) != HPE_OK || used != (size_t)count) { return -EBADMSG; }
         if (!count && !response_final) { return -EBADMSG; }
     }
     atomic_set(&stage, VERIFYING);
-    if (!response_final || (response_status != 200 && response_status != 201)) { return -EBADMSG; }
-    struct receipt { char *status; int size; char *sha256; } receipt;
+    if (response_status != 200 && (expected_offset < 0 || response_status != 201)) { return -EBADMSG; }
+    struct receipt { char *status; int size; char *sha256; int offset; } receipt;
     static const struct json_obj_descr fields[] = {
         JSON_OBJ_DESCR_PRIM(struct receipt, status, JSON_TOK_STRING),
         JSON_OBJ_DESCR_PRIM(struct receipt, size, JSON_TOK_NUMBER),
         JSON_OBJ_DESCR_PRIM(struct receipt, sha256, JSON_TOK_STRING),
+        JSON_OBJ_DESCR_PRIM(struct receipt, offset, JSON_TOK_NUMBER),
     };
-    ret = json_obj_parse(response_body, response_length, fields, ARRAY_SIZE(fields), &receipt);
-    if (ret != 7 || strcmp(receipt.status, "stored") || receipt.size != file_length ||
-        strcmp(receipt.sha256, expected_hash)) { return -EBADMSG; }
-    return 0;
+    int ret = json_obj_parse(response_body, response_length, fields, ARRAY_SIZE(fields), &receipt);
+    if (ret != 15) { return -EBADMSG; }
+    return accept_receipt(receipt.status, receipt.size, receipt.sha256, receipt.offset, expected_offset);
+}
+
+static int request_chunk(struct https_stream *stream, bool query, size_t offset, size_t length)
+{
+    char chunk_header[90] = {0};
+    if (!query) {
+        char digest[65];
+        int ret = hash_file_range(offset, length, digest);
+        if (ret) { return ret; }
+        snprintf(chunk_header, sizeof(chunk_header), "X-Chunk-SHA256: %s\r\n", digest);
+    }
+    int n = snprintf((char *)io, sizeof(io),
+        "%s /v2/devices/%s/recordings/%s/%u HTTP/1.1\r\n"
+        "Host: %s:%s\r\nAuthorization: Bearer %s\r\n"
+        "X-Recording-Size: %u\r\nX-Content-SHA256: %s\r\n"
+        "Upload-Offset: %u\r\n%sConnection: keep-alive\r\n"
+        "Content-Type: application/octet-stream\r\nContent-Length: %u\r\n\r\n",
+        query ? "GET" : "PUT", device_id, session, segment, host, port, token,
+        (unsigned int)file_length, expected_hash, (unsigned int)offset, chunk_header,
+        (unsigned int)length);
+    if (n < 0 || (size_t)n >= sizeof(io)) { return -EMSGSIZE; }
+    progress();
+    int ret = https_stream_write(stream, io, n);
+    memset(io, 0, sizeof(io));
+    if (ret) { return ret; }
+    if (!query) {
+        /* Hashing rewound the file; request formatting only reused the buffer. */
+        ret = send_payload(stream, offset, length);
+        if (ret < 0) { return ret; }
+    }
+    return receive_receipt(stream, query ? -1 : (int)(offset + length));
+}
+
+static int upload(struct https_stream *stream)
+{
+    int ret = request_chunk(stream, true, 0, 0);
+    if (ret) { return ret; }
+    size_t offset = atomic_get(&confirmed);
+    atomic_set(&resume_from, offset);
+    atomic_set(&bytes_sent, offset);
+    while (offset < file_length) {
+        ret = check_cancel();
+        if (ret) { return ret; }
+        size_t length = MIN(UPLOAD_CHUNK, file_length - offset);
+        ret = request_chunk(stream, false, offset, length);
+        if (ret) { return ret; }
+        offset = atomic_get(&confirmed);
+    }
+    return check_cancel();
 }
 
 static int tls_connect(struct https_stream **stream)
@@ -352,7 +415,11 @@ static void worker(void *a, void *b, void *c)
         if (!ret && (entry.type != FS_DIR_ENTRY_FILE || !entry.size || entry.size > MAX_FILE)) { ret = -EINVAL; }
         fs_file_t_init(&file);
         if (!ret) { ret = fs_open(&file, path, FS_O_READ); opened = ret == 0; }
-        if (!ret) { file_length = entry.size; ret = hash_file(); }
+        if (!ret) {
+            file_length = entry.size;
+            atomic_set(&total_bytes, file_length);
+            ret = hash_file();
+        }
         if (!ret) {
             atomic_set(&stage, CONNECTING);
             ret = wifi_station_connect(ssid, password, &cancelled);
@@ -439,7 +506,7 @@ static int start_upload(char *args)
     *split++ = 0;
     char *end;
     unsigned long n = strtoul(split, &end, 10);
-    if (!valid_id(args, 31) || !*split || *end || !n || n > 999999999 ||
+    if (!valid_session(args) || !*split || *end || !n || n > 999999999 ||
         !ssid[0] || !host[0] || !time_ready) { return -EINVAL; }
     struct clip_event_result_info result;
     int ret = clip_post_event_sync(CLIP_EVENT_UPLOAD_BEGIN, &result);
@@ -478,9 +545,10 @@ reply:
     struct wifi_station_network network;
     wifi_station_get_network(&network);
     return snprintf(response, length,
-        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"wifi_step\":\"%s\",\"tls_step\":\"%s\",\"wifi_ip\":\"%s\",\"wifi_netmask\":\"%s\",\"wifi_gateway\":\"%s\"}\n",
+        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"confirmed\":%d,\"resume_from\":%d,\"size\":%d,\"protocol\":2,\"wifi_step\":\"%s\",\"tls_step\":\"%s\",\"wifi_ip\":\"%s\",\"wifi_netmask\":\"%s\",\"wifi_gateway\":\"%s\"}\n",
         ret ? "false" : "true", ret, names[atomic_get(&stage)],
         https_poc_active() ? "true" : "false", (int)atomic_get(&last_error), (int)atomic_get(&bytes_sent),
+        (int)atomic_get(&confirmed), (int)atomic_get(&resume_from), (int)atomic_get(&total_bytes),
         wifi_station_last_step(), tls_steps[atomic_get(&tls_step)],
         network.ip, network.netmask, network.gateway);
 }

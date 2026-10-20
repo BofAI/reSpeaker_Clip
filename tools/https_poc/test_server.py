@@ -11,7 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 import unittest
 
 from make_credentials import generate
-from server import Receiver, MAX_FILE
+from server import Receiver, MAX_CHUNK, MAX_FILE
 
 
 class ReceiverTest(unittest.TestCase):
@@ -184,6 +184,119 @@ class ReceiverTest(unittest.TestCase):
         while list(self.server.directory.glob(".incoming-*")) and time.monotonic() < end:
             time.sleep(0.01)
         self.assertEqual(list(self.server.directory.glob(".incoming-*")), [])
+
+    def resume_request(self, method, segment, recording, offset=0, body=b"", overrides=None, conn=None):
+        headers = {"Authorization": "Bearer " + self.token,
+                   "X-Recording-Size": str(len(recording)),
+                   "X-Content-SHA256": hashlib.sha256(recording).hexdigest(),
+                   "Upload-Offset": str(offset), "Content-Length": str(len(body)),
+                   "X-Chunk-SHA256": hashlib.sha256(body).hexdigest()}
+        headers.update(overrides or {})
+        own_connection = conn is None
+        conn = conn or http.client.HTTPSConnection("localhost", self.server.server_port,
+                                                   context=self.context, timeout=3)
+        try:
+            conn.request(method, f"/v2/devices/clip-test/recordings/20261020000000/{segment}",
+                         body, headers)
+            response = conn.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            if own_connection:
+                conn.close()
+
+    def test_resume_reuses_tls_and_checks_every_durable_offset(self):
+        recording = bytes(range(256)) * 180
+        conn = http.client.HTTPSConnection("localhost", self.server.server_port,
+                                           context=self.context, timeout=3)
+        try:
+            status, reply = self.resume_request("GET", 501, recording, conn=conn)
+            self.assertEqual((status, reply["offset"], reply["status"]), (200, 0, "partial"))
+            transport = conn.sock
+            for offset in range(0, len(recording), MAX_CHUNK):
+                chunk = recording[offset:offset + MAX_CHUNK]
+                status, reply = self.resume_request("PUT", 501, recording, offset, chunk, conn=conn)
+                self.assertIn(status, (200, 201))
+                self.assertEqual(reply["offset"], offset + len(chunk))
+                if reply["status"] == "partial":
+                    self.assertIs(conn.sock, transport)
+                else:
+                    self.assertIsNone(conn.sock)
+            self.assertEqual(reply["status"], "stored")
+            identity = hashlib.sha256(b"clip-test/20261020000000/501").hexdigest()
+            self.assertEqual((self.server.directory / (identity + ".bin")).read_bytes(), recording)
+            status, reply = self.resume_request("GET", 501, recording, conn=conn)
+            self.assertEqual((status, reply["offset"], reply["status"]), (200, len(recording), "stored"))
+            self.assertEqual(self.resume_request("GET", 501, b"conflicting identity")[0], 409)
+        finally:
+            conn.close()
+
+    def test_partial_resume_survives_new_receiver(self):
+        recording = b"payload" * 5000
+        self.assertEqual(self.resume_request("PUT", 502, recording, 0, recording[:MAX_CHUNK])[0], 200)
+        other = Receiver(("127.0.0.1", 0), self.server.directory, "clip-test", self.token)
+        other.socket = self.server_context.wrap_socket(other.socket, server_side=True,
+                                                       do_handshake_on_connect=False)
+        worker = threading.Thread(target=other.serve_forever, daemon=True)
+        worker.start()
+        conn = http.client.HTTPSConnection("localhost", other.server_port, context=self.context, timeout=3)
+        try:
+            self.assertEqual(self.resume_request("GET", 502, recording, conn=conn)[1]["offset"], MAX_CHUNK)
+            for offset in range(MAX_CHUNK, len(recording), MAX_CHUNK):
+                status, reply = self.resume_request("PUT", 502, recording, offset,
+                                                    recording[offset:offset + MAX_CHUNK], conn=conn)
+                self.assertIn(status, (200, 201))
+            self.assertEqual(reply["status"], "stored")
+        finally:
+            conn.close()
+            other.shutdown()
+            other.server_close()
+            worker.join()
+
+    def test_resume_rejects_bad_chunks_without_advancing_checkpoint(self):
+        recording = b"a" * (MAX_CHUNK + 100)
+        self.assertEqual(self.resume_request("GET", 503, recording,
+                                          overrides={"Authorization": "Bearer wrong"})[0], 401)
+        self.assertEqual(self.resume_request("PUT", 503, recording, 1, b"a")[0], 409)
+        self.assertEqual(self.resume_request("PUT", 503, recording, 0, b"a",
+                                          overrides={"X-Chunk-SHA256": "0" * 64})[0], 422)
+        self.assertEqual(self.resume_request("PUT", 503, recording, 0, b"a",
+                                          overrides={"Transfer-Encoding": "chunked"})[0], 400)
+        self.assertEqual(self.resume_request("GET", 503, recording)[1]["offset"], 0)
+        self.assertEqual(self.resume_request("PUT", 503, recording, 0, recording[:MAX_CHUNK])[0], 200)
+        self.assertEqual(self.resume_request("GET", 503, recording,
+                                          overrides={"X-Content-SHA256": "0" * 64})[0], 409)
+        conn = http.client.HTTPSConnection("localhost", self.server.server_port, context=self.context)
+        try:
+            conn.putrequest("GET", "/v2/devices/clip-test/recordings/20261020000000/503")
+            conn.putheader("Authorization", "Bearer " + self.token)
+            conn.putheader("X-Recording-Size", str(len(recording)))
+            conn.putheader("X-Recording-Size", str(len(recording)))
+            conn.putheader("X-Content-SHA256", hashlib.sha256(recording).hexdigest())
+            conn.endheaders()
+            response = conn.getresponse()
+            self.assertEqual(response.status, 400)
+            response.read()
+        finally:
+            conn.close()
+        self.assertEqual(self.resume_request("GET", 503, recording)[1]["offset"], MAX_CHUNK)
+
+    def test_interrupted_chunk_preserves_previous_checkpoint(self):
+        recording = b"x" * (MAX_CHUNK * 2)
+        self.resume_request("PUT", 504, recording, 0, recording[:MAX_CHUNK])
+        conn = http.client.HTTPSConnection("localhost", self.server.server_port, context=self.context)
+        conn.connect()
+        headers = ("PUT /v2/devices/clip-test/recordings/20261020000000/504 HTTP/1.1\r\n"
+                   "Host: localhost\r\nAuthorization: Bearer " + self.token +
+                   "\r\nContent-Length: " + str(MAX_CHUNK) +
+                   "\r\nUpload-Offset: " + str(MAX_CHUNK) +
+                   "\r\nX-Recording-Size: " + str(len(recording)) +
+                   "\r\nX-Content-SHA256: " + hashlib.sha256(recording).hexdigest() +
+                   "\r\nX-Chunk-SHA256: " + hashlib.sha256(recording[MAX_CHUNK:]).hexdigest() + "\r\n\r\n")
+        conn.sock.sendall(headers.encode() + b"unfinished")
+        conn.close()
+        self.assertEqual(self.resume_request("GET", 504, recording)[1]["offset"], MAX_CHUNK)
+        self.assertEqual(self.resume_request("PUT", 504, recording, MAX_CHUNK,
+                                          recording[MAX_CHUNK:])[1]["status"], "stored")
 
 
 if __name__ == "__main__":
