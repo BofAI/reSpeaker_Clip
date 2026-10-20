@@ -19,6 +19,10 @@ The experimental USB `UPLOAD` status includes `protocol:2`, `size`, `sent`,
 `confirmed` and `resume_from`. The server checkpoint is queried on every job;
 only `confirmed` means durably acknowledged bytes. See the
 [resumable upload contract](https-resume-v2.md) for identities and recovery.
+`UPLOADSTATE=session:segment` reads the separate, destination-bound persistent
+HTTPS state while idle. It never changes phone sync flags; see
+[persistent upload state](https-upload-state.md). `UPLOAD?` also reports
+`state_error` for local metadata persistence failures.
 > Read-only `AT+RES` and thread stack queries remain available during uploads
 > when `CLIP_RESOURCE_STATS` is enabled. This is an experimental build profile.
 

@@ -13,6 +13,7 @@
 #include <ctype.h>
 #include "https_poc.h"
 #include "https_stream.h"
+#include "upload_state.h"
 #include "wifi_diag.h"
 #include "wifi_trace.h"
 #include "at_server.h"
@@ -33,6 +34,7 @@ BUILD_ASSERT(CONFIG_NET_SOCKETS_CONNECT_TIMEOUT > 0 &&
              "HTTPS requires bounded TCP + TLS connection timeouts (at most 30 seconds)");
 static atomic_t active, cancelled, stage, last_error, bytes_sent;
 static atomic_t confirmed, resume_from, total_bytes;
+static atomic_t state_error;
 static atomic_t stalled;
 static atomic_t record_pending, record_error, cleanup_error;
 enum { TLS_SETUP_IDLE, TLS_SETUP_DNS, TLS_SETUP_SOCKET, TLS_SETUP_CERTIFICATE,
@@ -128,6 +130,7 @@ bool https_poc_command_allowed(const char *name)
            !strcmp(name, "GSTAT") || !strcmp(name, "BATT") ||
            !strcmp(name, "VERSION") || !strcmp(name, "LIST") ||
            !strcmp(name, "START") || !strcmp(name, "STOP") ||
+           !strcmp(name, "UPLOADSTATE") ||
            !strcmp(name, "TIME") || !strcmp(name, "STORAGE");
 }
 
@@ -145,6 +148,7 @@ bool https_poc_event(enum clip_event event, struct clip_event_result_info *resul
             atomic_clear(&cancelled); atomic_clear(&stalled);
             atomic_clear(&last_error); atomic_clear(&bytes_sent);
             atomic_clear(&confirmed); atomic_clear(&resume_from); atomic_clear(&total_bytes);
+            atomic_clear(&state_error);
             atomic_clear(&cleanup_error);
             atomic_set(&stage, PREPARING);
         }
@@ -396,6 +400,81 @@ static int tls_connect(struct https_stream **stream)
     return ret;
 }
 
+static void digest_text(const uint8_t digest[32], char text[65])
+{
+    for (int i = 0; i < 32; i++) { snprintf(text + 2 * i, 3, "%02x", digest[i]); }
+}
+
+static void digest_bytes(const char text[65], uint8_t digest[32])
+{
+    for (int i = 0; i < 32; i++) {
+        unsigned int a = text[2 * i], b = text[2 * i + 1];
+        digest[i] = ((a <= '9' ? a - '0' : a - 'a' + 10) << 4) |
+                    (b <= '9' ? b - '0' : b - 'a' + 10);
+    }
+}
+
+static int destination_digest(uint8_t digest[32])
+{
+    if (!host[0]) { return -EINVAL; }
+    mbedtls_sha256_context hash;
+    mbedtls_sha256_init(&hash);
+    int ret = mbedtls_sha256_starts(&hash, 0);
+    const char *fields[] = {host, port, device_id};
+    for (size_t i = 0; !ret && i < ARRAY_SIZE(fields); i++) {
+        ret = mbedtls_sha256_update(&hash, (const uint8_t *)fields[i], strlen(fields[i]) + 1);
+    }
+    if (!ret) { ret = mbedtls_sha256_update(&hash, https_ca, sizeof(https_ca)); }
+    if (!ret) { ret = mbedtls_sha256_finish(&hash, digest); }
+    mbedtls_sha256_free(&hash);
+    return ret;
+}
+
+static int state_query(const char *args, char *response, size_t length)
+{
+    if (clip_event_get_state() != CLIP_STATE_IDLE) { return -EBUSY; }
+    char selector[48];
+    if (strlen(args) >= sizeof(selector)) { return -EINVAL; }
+    strcpy(selector, args);
+    char *colon = strchr(selector, ':');
+    if (!colon) { return -EINVAL; }
+    *colon++ = 0;
+    char *end;
+    unsigned long number = strtoul(colon, &end, 10);
+    if (!valid_session(selector) || !*colon || *end || !number || number > 999999999) { return -EINVAL; }
+    uint8_t destination[32];
+    int ret = destination_digest(destination);
+    if (ret) { return ret; }
+    ret = storage_ensure_mounted();
+    if (ret) { return ret; }
+    char path[STORAGE_PATH_MAX];
+    ret = storage_build_chunk_path(selector, number, path, sizeof(path));
+    if (ret) { return ret; }
+    struct fs_dirent entry;
+    ret = fs_stat(path, &entry);
+    if (ret) { return ret; }
+    if (entry.type != FS_DIR_ENTRY_FILE) { return -EINVAL; }
+    struct upload_file_record record;
+    int loaded = upload_state_load(selector, number, &record);
+    if (loaded && loaded != -ENOENT && loaded != -EBADMSG) { return loaded; }
+    bool size_match = !loaded && record.size == entry.size;
+    bool destination_match = !loaded &&
+                             !memcmp(record.destination_sha256, destination, sizeof(destination));
+    bool matches = size_match && destination_match;
+    char hash[65] = {0};
+    if (!loaded) { digest_text(record.content_sha256, hash); }
+    return snprintf(response, length,
+        "{\"ok\":true,\"data\":{\"session\":\"%s\",\"segment\":%u,\"state\":\"%s\","
+        "\"size\":%u,\"confirmed\":%u,\"last_error\":%d,\"state_valid\":%s,"
+        "\"destination_match\":%s,\"size_match\":%s,"
+        "\"state_error\":%d,\"sha256\":\"%s\"}}\n",
+        selector, (unsigned int)number, upload_state_name(matches ? record.state : UPLOAD_PENDING),
+        (unsigned int)entry.size, matches ? (unsigned int)record.confirmed : 0,
+        matches ? (int)record.last_error : 0, loaded ? "false" : "true",
+        destination_match ? "true" : "false", size_match ? "true" : "false",
+        loaded == -EBADMSG ? loaded : 0, hash);
+}
+
 static void worker(void *a, void *b, void *c)
 {
     ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
@@ -408,6 +487,8 @@ static void worker(void *a, void *b, void *c)
         buffers = k_malloc(sizeof(*buffers));
         int ret = buffers ? storage_ensure_mounted() : -ENOMEM;
         bool opened = false;
+        bool state_ready = false;
+        struct upload_file_record stamp = {0};
         struct https_stream *stream = NULL;
         struct fs_dirent entry;
         if (!ret) { ret = storage_build_chunk_path(session, segment, path, sizeof(path)); }
@@ -419,6 +500,16 @@ static void worker(void *a, void *b, void *c)
             file_length = entry.size;
             atomic_set(&total_bytes, file_length);
             ret = hash_file();
+        }
+        if (!ret) {
+            stamp.size = file_length;
+            digest_bytes(expected_hash, stamp.content_sha256);
+            ret = destination_digest(stamp.destination_sha256);
+            if (!ret) {
+                state_ready = true;
+                ret = upload_state_save(session, segment, &stamp);
+                atomic_set(&state_error, ret);
+            }
         }
         if (!ret) {
             atomic_set(&stage, CONNECTING);
@@ -441,6 +532,22 @@ static void worker(void *a, void *b, void *c)
         buffers = NULL;
         if (atomic_get(&cancelled)) { ret = -ECANCELED; }
         else if (atomic_get(&stalled)) { ret = -ETIMEDOUT; }
+        if (state_ready) {
+            stamp.confirmed = atomic_get(&confirmed);
+            stamp.last_error = ret;
+            if (stamp.confirmed == stamp.size) {
+                stamp.state = UPLOAD_STORED;
+                stamp.last_error = 0;
+            } else if (stamp.confirmed) { stamp.state = UPLOAD_PARTIAL; }
+            else { stamp.state = ret == -ECANCELED ? UPLOAD_PENDING : UPLOAD_FAILED; }
+            int saved = atomic_get(&cleanup_error);
+            if (!saved) { saved = upload_state_save(session, segment, &stamp); }
+            atomic_set(&state_error, saved);
+            /* A metadata I/O/close failure must not release a queued start
+             * onto storage whose handle cleanup could not be confirmed. */
+            if (saved && !atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, saved); }
+            if (!ret && saved) { ret = saved; }
+        }
         atomic_set(&last_error, ret);
         atomic_set(&stage, ret == -ECANCELED ? CANCELLED : ret ? FAILED : SUCCEEDED);
         struct clip_event_result_info result;
@@ -539,16 +646,20 @@ static int command(struct at_cmd_ctx *ctx, char *response, size_t length)
         ret = set_upload_time(args);
     } else if (!strcmp(ctx->name, "UPLOAD")) {
         ret = start_upload(args);
+    } else if (!strcmp(ctx->name, "UPLOADSTATE")) {
+        ret = state_query(args, response, length);
+        if (ret >= 0) { memset(args, 0, sizeof(args)); return ret; }
     } else { ret = -ENOTSUP; }
 reply:
     memset(args, 0, sizeof(args));
     struct wifi_station_network network;
     wifi_station_get_network(&network);
     return snprintf(response, length,
-        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"confirmed\":%d,\"resume_from\":%d,\"size\":%d,\"protocol\":2,\"wifi_step\":\"%s\",\"tls_step\":\"%s\",\"wifi_ip\":\"%s\",\"wifi_netmask\":\"%s\",\"wifi_gateway\":\"%s\"}\n",
+        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"confirmed\":%d,\"resume_from\":%d,\"size\":%d,\"state_error\":%d,\"protocol\":2,\"wifi_step\":\"%s\",\"tls_step\":\"%s\",\"wifi_ip\":\"%s\",\"wifi_netmask\":\"%s\",\"wifi_gateway\":\"%s\"}\n",
         ret ? "false" : "true", ret, names[atomic_get(&stage)],
         https_poc_active() ? "true" : "false", (int)atomic_get(&last_error), (int)atomic_get(&bytes_sent),
         (int)atomic_get(&confirmed), (int)atomic_get(&resume_from), (int)atomic_get(&total_bytes),
+        (int)atomic_get(&state_error),
         wifi_station_last_step(), tls_steps[atomic_get(&tls_step)],
         network.ip, network.netmask, network.gateway);
 }
@@ -560,6 +671,7 @@ int https_poc_register(void)
         {"NETCFG", AT_CMD_SET, command}, {"UPLOADCFG", AT_CMD_SET, command},
         {"UPTIME", AT_CMD_SET, command}, {"UPLOAD", AT_CMD_SET | AT_CMD_QUERY, command},
         {"UPLOADCANCEL", AT_CMD_EXEC, command},
+        {"UPLOADSTATE", AT_CMD_SET, command},
     };
     for (size_t i = 0; i < ARRAY_SIZE(commands); i++) {
         ret = at_server_register_cmd(&commands[i]);

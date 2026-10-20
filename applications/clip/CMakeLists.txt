@@ -83,7 +83,7 @@ if(CONFIG_CLIP_HTTPS_POC)
     file(WRITE "${PROJECT_BINARY_DIR}/https_ca.h"
         "static const unsigned char https_ca[] = {${_ca_bytes}0};\n")
     target_include_directories(app PRIVATE "${PROJECT_BINARY_DIR}")
-    target_sources(app PRIVATE src/wifi_station.c src/https_poc.c src/https_stream.c)
+    target_sources(app PRIVATE src/wifi_station.c src/https_poc.c src/https_stream.c src/upload_state.c)
 else()
     target_sources(app PRIVATE src/wifi.c)
 endif()

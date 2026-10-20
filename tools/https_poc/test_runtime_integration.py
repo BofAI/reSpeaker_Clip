@@ -42,6 +42,7 @@ struct clip_event_result_info { int result; };
 struct wifi_station_network { char ip[16], netmask[16], gateway[16]; };
 static int active, cancelled, stalled, last_error, bytes_sent, stage, tls_step, start_job;
 static int confirmed, resume_from, total_bytes;
+static int state_error, state_queries;
 static char ssid[33], password[64], host[96], port[6], device_id[33], token[97], session[32];
 static uint32_t segment;
 static bool time_ready;
@@ -53,6 +54,9 @@ static bool https_poc_active(void) { return active; }
 static bool https_poc_record_pending(void) { return false; }
 static int atomic_get(int *v) { return *v; }
 static void request_cancel(void) { cancelled = 1; interrupts++; }
+static int state_query(const char *args, char *out, size_t length) {
+    assert(args && out && length); state_queries++; return -ENOENT;
+}
 static void wifi_diag_reset(void) { resets++; }
 static void k_sem_give(int *sem) { (*sem)++; starts++; }
 static const char *wifi_station_last_step(void) { return "idle"; }
@@ -93,6 +97,8 @@ int main(void) {
     assert(!host[0]);
     request("UPLOADCFG", "receiver,8443,fixture,aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1, AT_CMD_TYPE_SET, 0);
     assert(!strcmp(host, "receiver") && !strcmp(port, "8443"));
+    request("UPLOADSTATE", "20261019070446:1", 1, AT_CMD_TYPE_SET, -ENOENT);
+    assert(state_queries == 1);
     request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, -EINVAL);
     request("UPTIME", "invalid", 1, AT_CMD_TYPE_SET, -EINVAL);
     clock_error = 1;
@@ -112,6 +118,8 @@ int main(void) {
     event_result = 0; cancelled = stalled = last_error = bytes_sent = 1;
     request("UPLOAD", "20261019070446:1", 1, AT_CMD_TYPE_SET, 0);
     assert(active && starts == 1 && resets == 1 && stage == PREPARING);
+    request("UPLOADSTATE", "20261019070446:1", 1, AT_CMD_TYPE_SET, -EBUSY);
+    assert(state_queries == 1);
     assert(segment == 1 && !strcmp(session, "20261019070446"));
     assert(!cancelled && !stalled && !last_error && !bytes_sent);
     request("UPLOAD", NULL, 1, 0, 0);
@@ -203,8 +211,10 @@ int main(void) {
         assert(!https_poc_command_allowed("PAIR"));
         assert(!https_poc_command_allowed("DELETE"));
         assert(!https_poc_command_allowed("WIFI"));
+        assert(https_poc_command_allowed("UPLOADSTATE") == !busy);
     }
     assert(!https_poc_command_allowed("NETCFG"));
+    assert(!https_poc_command_allowed("UPLOADSTATE"));
     assert(https_poc_command_allowed("START"));
     assert(https_poc_command_allowed("STOP"));
     busy=false;

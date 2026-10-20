@@ -10,6 +10,8 @@
 > The experimental USB uploader uses the [v2 resumable protocol](../docs/https-resume-v2.md).
 > Its `confirmed` offset, rather than bytes sent, is the server's durable checkpoint;
 > this does not add an SDK automatic-upload queue.
+> [Persistent HTTPS state](../docs/https-upload-state.md) is queried separately
+> with `UPLOADSTATE`; it does not reuse the SDK's phone synchronization fields.
 
 The new Python SDK for the current reSpeaker Clip firmware.  It is intentionally
 independent from `applications/clip/tests`: that directory remains the legacy

@@ -122,8 +122,9 @@ python3 tools/https_poc/device.py --port /dev/cu.usbmodemXXXX --cancel
 已完成的受控测试范围、资源占用与残留问题见 [录音抢占实机验证](../../docs/https-preemption-0.1.2.md)。
 
 第二阶段增加文件内续传：再次执行同一 `AT+UPLOAD=session:片段号` 时先查询服务器
-已落盘偏移，验证完整文件身份，再继续发送。还未实现空闲自动调度、设备持久队列
-和自动重试；仍需外部再次发起命令。第一阶段抢占结果不能代替第二阶段续传验收。
+已落盘偏移，验证完整文件身份，再继续发送。第三阶段增加独立的
+[设备持久状态](../../docs/https-upload-state.md) 和空闲查询 `AT+UPLOADSTATE=session:片段号`。
+还未实现空闲自动调度和自动重试；仍需外部再次发起命令。
 
 对应命令：`AT+NETCFG=ssid,password`、`AT+UPLOADCFG=host,port,device,token`、`AT+UPTIME=Unix秒`、`AT+UPLOAD=session:片段号`、`AT+UPLOAD?`、`AT+UPLOADCANCEL`。配置和上传控制仅接受 USB，响应不返回凭据。
 
