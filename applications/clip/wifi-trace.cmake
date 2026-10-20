@@ -1,8 +1,12 @@
 # Only this diagnostic image uses generated SDK source copies. SDK stays intact.
 set(_trace_dir "${PROJECT_BINARY_DIR}/wifi_trace_sdk")
+set(_trace_backports)
+if(CONFIG_CLIP_NETWORK_BACKPORT_ARP)
+    list(APPEND _trace_backports --arp-backport)
+endif()
 execute_process(COMMAND "${PYTHON_EXECUTABLE}"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/https_poc/instrument_network.py"
-    --zephyr "${ZEPHYR_BASE}" --output "${_trace_dir}"
+    --zephyr "${ZEPHYR_BASE}" --output "${_trace_dir}" ${_trace_backports}
     RESULT_VARIABLE _trace_result)
 if(NOT _trace_result EQUAL 0)
     message(FATAL_ERROR "Pinned SDK network diagnostics could not be generated")

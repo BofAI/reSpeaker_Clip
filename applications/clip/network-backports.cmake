@@ -1,0 +1,28 @@
+# Replace one pinned SDK source in this build only; never patch the workspace.
+set(_backport_dir "${PROJECT_BINARY_DIR}/network_backports")
+execute_process(COMMAND "${PYTHON_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/https_poc/backport_network.py"
+    --zephyr "${ZEPHYR_BASE}" --output "${_backport_dir}" --dhcp
+    RESULT_VARIABLE _backport_result)
+if(NOT _backport_result EQUAL 0)
+    message(FATAL_ERROR "Pinned SDK DHCP backport could not be generated")
+endif()
+set(_dhcp_target subsys__net__lib__dhcpv4)
+get_target_property(_dhcp_sources ${_dhcp_target} SOURCES)
+get_target_property(_dhcp_base ${_dhcp_target} SOURCE_DIR)
+set(_dhcp_updated)
+set(_dhcp_found 0)
+foreach(source IN LISTS _dhcp_sources)
+    get_filename_component(absolute "${source}" ABSOLUTE BASE_DIR "${_dhcp_base}")
+    if(absolute STREQUAL "${ZEPHYR_BASE}/subsys/net/lib/dhcpv4/dhcpv4.c")
+        list(APPEND _dhcp_updated "${_backport_dir}/dhcpv4.c")
+        math(EXPR _dhcp_found "${_dhcp_found} + 1")
+    else()
+        list(APPEND _dhcp_updated "${source}")
+    endif()
+endforeach()
+if(NOT _dhcp_found EQUAL 1)
+    message(FATAL_ERROR "SDK DHCP source target changed; review backport integration")
+endif()
+set_property(TARGET ${_dhcp_target} PROPERTY SOURCES "${_dhcp_updated}")
+target_include_directories(${_dhcp_target} PRIVATE "${ZEPHYR_BASE}/subsys/net/lib/dhcpv4")

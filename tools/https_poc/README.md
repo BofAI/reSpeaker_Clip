@@ -65,6 +65,10 @@ python /home/ubuntu/firmware/reSpeaker_Clip-https/tools/https_poc/build.py \
 
 ### DHCP 旧租约复用对照
 
+上游 DHCP／ARP 补丁的独立回移配置、来源和验证方法见
+[网络补丁对照](../../docs/network-backports-0.1.2.md)。它们只改变构建目录中的
+SDK 副本，不修改共享 NCS 工作区；DHCP 与 ARP 分开验证。
+
 `https.conf` 默认 TCP 建连预算为 3 秒；追加 `https-connect-budget.conf`
 后为 10 秒，TLS 握手仍为 10 秒。当前诊断基线依次追加 `runtime.conf`、
 `netdiag.conf`、`https-connect-budget.conf`、`https-wifi-no-stbc.conf`。

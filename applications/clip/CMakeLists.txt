@@ -5,6 +5,10 @@ cmake_minimum_required(VERSION 3.20)
 find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
 project(clip)
 
+if(CONFIG_CLIP_NETWORK_BACKPORT_DHCP)
+    include(network-backports.cmake)
+endif()
+
 target_sources_ifdef(CONFIG_CLIP_RESOURCE_STATS app PRIVATE src/resource_stats.c)
 target_sources_ifdef(CONFIG_CLIP_WIFI_DIAG app PRIVATE src/wifi_diag.c)
 if(CONFIG_CLIP_WIFI_DIAG)

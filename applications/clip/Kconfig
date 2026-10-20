@@ -29,6 +29,25 @@ config CLIP_HTTPS_STA_PS_OFF
 	  coexistence setup. Keep driver low-power support, TCP timeout, buffers,
 	  and idle radio shutdown unchanged. Fail the job if the request fails.
 
+config CLIP_NETWORK_BACKPORT_DHCP
+	bool "Experimental pinned-SDK DHCP INIT-REBOOT fixes"
+	depends on CLIP_HTTPS_POC && NET_DHCPV4_INIT_REBOOT
+	default n
+
+config CLIP_DHCP_REBOOT_ATTEMPTS
+	int "INIT-REBOOT requests before falling back to DISCOVER"
+	depends on CLIP_NETWORK_BACKPORT_DHCP
+	range 1 255
+	default 1
+
+config CLIP_NETWORK_BACKPORT_ARP
+	bool "Experimental pinned-SDK ARP pending-entry fixes"
+	depends on CLIP_HTTPS_POC && CLIP_WIFI_DIAG
+	default n
+	help
+	  Generate fixed ARP source together with the existing passive diagnostics.
+	  Keep this separate from the DHCP experiment for a controlled comparison.
+
 module = CLIP
 module-str = Clip Application
 source "subsys/logging/Kconfig.template.log_config"

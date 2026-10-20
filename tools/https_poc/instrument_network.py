@@ -3,6 +3,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+import backport_network
 
 
 SOURCES = {
@@ -100,20 +101,25 @@ def transform(name, text):
     return '#include "wifi_trace.h"\n' + text
 
 
-def generate(zephyr, output):
+def generate(zephyr, output, arp_backport=False):
     generated = {}
     # Check all originals and insertion points before writing any output.
     for name, (relative, expected) in SOURCES.items():
         raw = (zephyr / relative).read_bytes()
         if hashlib.sha256(raw).hexdigest() != expected:
             raise ValueError(f"Pinned SDK source changed: {relative}; review instrumentation")
-        generated[name] = transform(name, raw.decode())
+        source = raw.decode()
+        if name == "arp.c" and arp_backport:
+            source = backport_network.arp(source)
+        generated[name] = transform(name, source)
     output.mkdir(parents=True, exist_ok=True)
     manifest = {}
     for name, text in generated.items():
         (output / name).write_text(text)
         manifest[name] = {"original": SOURCES[name][1],
                           "instrumented": hashlib.sha256(text.encode()).hexdigest()}
+        if name == "arp.c" and arp_backport:
+            manifest[name]["backport_commits"] = backport_network.COMMITS[name]
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
@@ -121,5 +127,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--zephyr", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--arp-backport", action="store_true")
     args = parser.parse_args()
-    generate(args.zephyr, args.output)
+    generate(args.zephyr, args.output, args.arp_backport)
