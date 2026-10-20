@@ -63,6 +63,27 @@ python /home/ubuntu/firmware/reSpeaker_Clip-https/tools/https_poc/build.py \
 `AT+RES` 查询系统堆和 CPU，`AT+RES=线程序号` 查询栈高水位；上传期间也可查询。
 静态 RAM 包含堆栈预留，不能与运行时分配相加；系统堆统计也不覆盖所有独立内存池。
 
+### DHCP 旧租约复用对照
+
+`https.conf` 默认 TCP 建连预算为 3 秒；追加 `https-connect-budget.conf`
+后为 10 秒，TLS 握手仍为 10 秒。当前诊断基线依次追加 `runtime.conf`、
+`netdiag.conf`、`https-connect-budget.conf`、`https-wifi-no-stbc.conf`。
+
+在独立构建目录中，再追加
+`--extra-conf /absolute/source/applications/clip/https-dhcp-fresh.conf`，
+只关闭 `CONFIG_NET_DHCPV4_INIT_REBOOT`，让每次 Wi-Fi 重连重新发现 DHCP
+服务器，避免先请求上一轮租约地址。不改变 TCP/TLS 超时、Wi-Fi 省电、STBC、
+缓冲区或栈配置，也不修改共享 SDK。
+
+该配置用于诊断，尚不能视为修复。本轮基线抓包中，部分 DHCP 超时样本重复请求
+旧网段地址，同时 Mac 可见新网关发出的 NACK；SDK 在旧租约复用状态下存在
+按此前请求服务器地址过滤 NACK 的路径。Mac 可见 NACK 不证明设备收到或处理了
+它，其他 DHCP 超时及此前 HTTP 发送失败仍需分别确认。
+
+对照时保留相同 SSID、接收端、录音和 TCP 10 秒配置，同步记录 DHCP 报文与
+设备阶段，核对 REQUEST／DISCOVER 流程、地址来源、超时率、文件逐字节一致性及
+失败后的资源回落。编译和签名通过仅表示镜像可构建，须另外安排实机验证。
+
 ## 4. USB 控制方式
 
 先完成外置补丁启动验证，再连接 USB CDC。建立权限为 `0600` 的私有 JSON 配置，字段为 `ssid`、`password`、`host`、`port`、`device`、`token`。`host` 必须与证书中的 DNS 名称或 IP 地址一致，`device` 与接收端一致。`make_credentials.py --hostname` 接受 DNS 名称或 IPv4 地址，并生成对应 SAN 类型；局域网 IP 改变时需重新生成证书并构建。SSID 不支持逗号；首版只支持 2.4 GHz WPA2-Personal。
