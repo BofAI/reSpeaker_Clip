@@ -5,6 +5,7 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   desktop_webview_window
   file_selector_windows
+  flutter_secure_storage_windows
   opus_flutter_windows
   permission_handler_windows
   record_windows

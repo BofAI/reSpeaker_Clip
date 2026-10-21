@@ -97,6 +97,7 @@ dependencies:
   sign_in_with_apple: ^7.0.1
   flutter_web_auth_2: ^5.0.1
   crypto: ^3.0.7
+  flutter_secure_storage: ^9.2.4
 
 # Override the pub.dev opus_flutter_android with a locally patched version:
 # upstream 3.0.1 builds libopus.so without 16KB ELF alignment, which breaks

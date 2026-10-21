@@ -157,7 +157,7 @@ class SenseCraftVoiceClient {
           .where((s) => s == BluetoothConnectionState.connected)
           .first
           .timeout(const Duration(seconds: 8));
-      return _buildConnection(device);
+      return await _buildConnection(device);
     } catch (e) {
       SdkLog.w(
         'SenseCraftVoiceClient.connectByDeviceId failed',

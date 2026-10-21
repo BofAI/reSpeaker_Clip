@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>使用麦克风录制音频，保存到本地并按你的设置备份。</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>搜索并连接你的 reSpeaker Clip，查询设备状态和控制录音。</string>
 </dict>
 </plist>

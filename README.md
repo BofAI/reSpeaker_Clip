@@ -6,6 +6,10 @@ USB, AT-command control, and UDP file transfer.
 
 > **Note**: Product name is spelled **reSpeaker** (lowercase `r`).
 
+## macOS desktop and audio storage
+
+This branch includes Boa Voice, a Flutter macOS audio workspace, and a self-hosted HTTP audio storage service. See [desktop and server setup](README-desktop.md) for features, installation, configuration and tests.
+
 ## Hardware
 
 | Component | Part |
