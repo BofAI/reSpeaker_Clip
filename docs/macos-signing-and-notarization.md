@@ -2,7 +2,7 @@
 
 ## 当前 Beta 状态
 
-当前 `1.0.1-beta.1` DMG 使用本机临时签名，未经过 Apple 公证。文件完整性和复制后的签名验证通过，不等于通过 Gatekeeper 分发检查。
+当前 `1.0.1-beta.2` DMG 使用本机临时签名，未经过 Apple 公证。文件完整性和复制后的签名验证通过，不等于通过 Gatekeeper 分发检查。
 
 当前开发机没有可用 Developer ID 签名身份，用户暂时没有付费 Apple Developer 账号；因此本次没有进行 Developer ID 签名、公证或更换已发布的安装包。
 
@@ -39,7 +39,7 @@ bash scripts/run-desktop.sh
 4. 重新检查实际签名的 entitlements：不得包含 `com.apple.security.get-task-allow=true`；保留业务所需的网络、麦克风和蓝牙权限。当前临时签名构建不能直接当作满足公证前提的构建。
 5. 通过 Xcode 的 Developer ID/Direct Distribution 分发流程，或 `notarytool` 提交公证，查看 Accepted 结果和公证日志。
 6. 对最终发布容器附加公证票据，使用 stapler 验证、Gatekeeper 评估，并在其他 Mac 上做首次安装测试。
-7. 新包发布为后续 Beta 版本（例如 `1.0.1-beta.2`），不覆盖 Beta 1 的原始附件与校验值。
+7. 新包发布为后续 Beta 版本（例如 `1.0.1-beta.3`），不覆盖旧版本的原始附件与校验值。
 
 不需要上架 App Store。Beta 也可以签名与公证。具体能力和证书创建权限由开发者团队角色决定。
 

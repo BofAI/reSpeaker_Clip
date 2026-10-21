@@ -10,10 +10,14 @@ if [[ "${1:-}" != "--skip-build" ]]; then
 fi
 APP="$ROOT/mobile/app/build/macos/Build/Products/Release/Boa Voice.app"
 [[ -d "$APP" ]] || { echo "Release app missing: $APP" >&2; exit 1; }
+python3 "$ROOT/scripts/verify-macos-bundle.py" "$APP"
 codesign --verify --deep --strict "$APP"
 # Keep the prerelease suffix; Apple's native bundle version may strip it.
-VERSION=$(sed -n 's/^version: *//p' "$ROOT/mobile/app/pubspec.yaml")
-VERSION="${VERSION%%+*}"
+PACKAGE_VERSION=$(sed -n 's/^version: *//p' "$ROOT/mobile/app/pubspec.yaml")
+VERSION="${PACKAGE_VERSION%%+*}"
+BUILD_NUMBER="${PACKAGE_VERSION##*+}"
+APP_BUILD_NUMBER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Contents/Info.plist")
+[[ "$APP_BUILD_NUMBER" == "$BUILD_NUMBER" ]] || { echo 'App build number differs from pubspec.yaml; rebuild first' >&2; exit 1; }
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid version' >&2; exit 1; }
 ARCHS=$(lipo -archs "$APP/Contents/MacOS/Boa Voice")
 if [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]; then
@@ -36,6 +40,8 @@ Boa Voice macOS $VERSION
 
 安装：将 Boa Voice.app 拖到 Applications，等待复制完成，再推出此磁盘映像。
 首次使用麦克风与 Clip 蓝牙时，需要允许对应系统权限。
+若提示“Apple 无法验证”，先点完成，再到系统设置 → 隐私与安全性，
+在 Boa Voice 被阻止提示旁点击“仍要打开”，由本人完成系统确认。
 
 音频存储 Server 独立运行，安装 App 不会启动 Server。
 安装及配置说明：

@@ -4,11 +4,13 @@
 
 ## Beta 安装包下载
 
-当前发布版本：**1.0.1-beta.1**。验收完成前统一使用 Beta 版本，GitHub Release 标记为预发布。
+当前发布版本：**1.0.1-beta.2**。验收完成前统一使用 Beta 版本，GitHub Release 标记为预发布。
 
-- [Release 与所有附件](https://github.com/BofAI/reSpeaker_Clip/releases/tag/boa-desktop-v1.0.1-beta.1)
-- [macOS DMG（Apple Silicon / Intel 通用）](https://github.com/BofAI/reSpeaker_Clip/releases/download/boa-desktop-v1.0.1-beta.1/Boa-Voice-1.0.1-beta.1-macos-universal.dmg)
+- [Release 与所有附件](https://github.com/BofAI/reSpeaker_Clip/releases/tag/boa-desktop-v1.0.1-beta.2)
+- [macOS DMG（Apple Silicon / Intel 通用）](https://github.com/BofAI/reSpeaker_Clip/releases/download/boa-desktop-v1.0.1-beta.2/Boa-Voice-1.0.1-beta.2-macos-universal.dmg)
 - [Server 源码包](https://github.com/BofAI/reSpeaker_Clip/releases/download/boa-desktop-v1.0.1-beta.1/Boa-Audio-Storage-1.0.1-beta.1-source.tar.gz)
+
+Beta 2 修复了 Beta 1 在安装后缺少 Homebrew 动态库而启动崩溃的问题；请使用 Beta 2。Server 继续使用兼容的 1.0.1-beta.1。
 
 双击 DMG，将 App 拖入 Applications。Server 需单独启动，配置步骤见下文。DMG 采用临时签名，未经过 Apple 公证。
 
@@ -110,7 +112,7 @@ open "$HOME/Applications/Boa Voice.app"
 bash scripts/package-macos-dmg.sh
 ```
 
-脚本先构建 `desktop_main.dart`，校验 App 签名，再生成 `dist/Boa-Voice-<版本>-macos-<架构>.dmg` 和 `.sha256`。文件名保留 pubspec.yaml 中的 Beta 后缀；架构根据实际主程序判断，包含 arm64 和 x86_64 时标记 universal。已有同名安装包时停止，避免意外覆盖。
+脚本先构建 `desktop_main.dart`，检查包内全部原生文件的动态库依赖及构建号，校验 App 签名，再生成 `dist/Boa-Voice-<版本>-macos-<架构>.dmg` 和 `.sha256`。文件名保留 pubspec.yaml 中的 Beta 后缀；架构根据实际主程序判断，包含 arm64 和 x86_64 时标记 universal。已有同名安装包时停止，避免意外覆盖。
 
 如果已经完成 Release 构建，可用 `bash scripts/package-macos-dmg.sh --skip-build` 仅打包。打开 DMG，将 Boa Voice.app 拖入 Applications，复制完成后推出映像，再从应用程序启动。更新时先退出旧版；音频及配置位于 App 沙箱，不在 DMG 中。
 
@@ -152,3 +154,5 @@ flutter analyze lib/desktop_main.dart lib/src/features/desktop lib/src/features/
 新增业务功能可先从桌面页面拆分独立模块，再复用 HTTP 客户端。模型转写与摘要需要另行实现配置、异步任务与结果展示，不会因音频上传而自动触发。
 
 接口、服务端验证脚本与限制见 [服务 README](services/audio_storage/README.md)。
+
+原生依赖回归测试：`python3 -m unittest discover -s scripts/tests -v`。独立检查安装包中的 App：`python3 scripts/verify-macos-bundle.py /Applications/Boa\ Voice.app`。打包检查会拒绝 Homebrew 等开发机绝对路径依赖。

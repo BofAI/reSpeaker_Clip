@@ -17,10 +17,10 @@ PODS:
     - FlutterMacOS
   - desktop_webview_window (0.0.1):
     - FlutterMacOS
-  - ffmpeg_kit_flutter_new (1.0.0):
-    - ffmpeg_kit_flutter_new/full-gpl (= 1.0.0)
+  - ffmpeg_kit_flutter_new (8.1.2):
+    - ffmpeg_kit_flutter_new/full-gpl (= 8.1.2)
     - FlutterMacOS
-  - ffmpeg_kit_flutter_new/full-gpl (1.0.0):
+  - ffmpeg_kit_flutter_new/full-gpl (8.1.2):
     - FlutterMacOS
   - file_picker (0.0.1):
     - FlutterMacOS
@@ -206,7 +206,7 @@ SPEC CHECKSUMS:
   AppCheckCore: be8fce5469f68d7f6a29aa94b25f097409ff7fdc
   audio_session: eaca2512cf2b39212d724f35d11f46180ad3a33e
   desktop_webview_window: 7e37af677d6d19294cb433d9b1d878ef78dffa4d
-  ffmpeg_kit_flutter_new: 4eb1908463948e877ff5c4f2c7bb28f2a5dfd11b
+  ffmpeg_kit_flutter_new: 26a446b2926c061000aa81e69ac836bc29c9e652
   file_picker: 7584aae6fa07a041af2b36a2655122d42f578c1a
   file_selector_macos: 6280b52b459ae6c590af5d78fc35c7267a3c4b31
   flutter_archive: 07888d9aeb79da005e0ad8b9d347d17cdea07f68

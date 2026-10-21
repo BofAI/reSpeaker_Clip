@@ -8,7 +8,7 @@ USB, AT-command control, and UDP file transfer.
 
 ## macOS desktop and audio storage
 
-This branch includes Boa Voice, a Flutter macOS audio workspace, and a self-hosted HTTP audio storage service. Download the [1.0.1-beta.1 preview](https://github.com/BofAI/reSpeaker_Clip/releases/tag/boa-desktop-v1.0.1-beta.1). See [desktop and server setup](README-desktop.md) for features, installation, configuration and tests.
+This branch includes Boa Voice, a Flutter macOS audio workspace, and a self-hosted HTTP audio storage service. Download the [1.0.1-beta.2 preview](https://github.com/BofAI/reSpeaker_Clip/releases/tag/boa-desktop-v1.0.1-beta.2). See [desktop and server setup](README-desktop.md) for features, installation, configuration and tests.
 
 ## Hardware
 

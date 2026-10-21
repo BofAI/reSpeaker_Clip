@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.0.1-beta.1+1
+version: 1.0.1-beta.2+2
 
 environment:
   sdk: ">=3.6.0 <4.0.0"
@@ -87,7 +87,7 @@ dependencies:
   # Audio record (local Opus for server API testing)
   record: ^6.2.0
   # FFmpeg transcoding (Opus export)
-  ffmpeg_kit_flutter_new: ^4.1.0
+  ffmpeg_kit_flutter_new: 4.6.2
   # Raw Opus decoding (device format: 2-byte length-prefixed frames)
   opus_dart: ^3.0.1
   opus_flutter: ^3.0.3
