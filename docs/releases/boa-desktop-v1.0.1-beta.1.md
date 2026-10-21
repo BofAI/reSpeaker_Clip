@@ -11,6 +11,8 @@ macOS 桌面端与自托管音频存储服务的 Beta 预发布。后续验收�
 
 打开 DMG，将 Boa Voice.app 拖入 Applications，等待复制后推出映像。首次使用麦克风、蓝牙需允许相应系统权限。本次为临时签名，未经过 Apple 公证，其他 Mac 首次运行和最低系统版本兼容性仍需验证。
 
+首次出现“Apple 无法验证”时，确认来源后，前往“系统设置 → 隐私与安全性”，在 Boa Voice 被阻止提示旁选择“仍要打开”，由安装者本人按系统提示确认。详见 [首次打开说明](https://github.com/BofAI/reSpeaker_Clip/blob/boa/macos-desktop-audio-storage/docs/macos-signing-and-notarization.md)。
+
 Server 独立启动，不包含在 App 中。解压 Server 源码包后执行：
 
 ```sh
