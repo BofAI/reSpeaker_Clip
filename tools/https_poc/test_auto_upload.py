@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 def compile_run(code, arguments=()):
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        (root / 'test.c').write_text(code)
+        (root / 'test.c').write_text('#include "upload_perf.h"\n' + code)
         subprocess.run(['clang', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                         '-fsanitize=address,undefined', '-I'+str(ROOT/'applications/clip/include'),
                         str(root/'test.c'), '-o', str(root/'test')], check=True)

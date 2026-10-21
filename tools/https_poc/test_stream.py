@@ -152,7 +152,8 @@ int main(int argc,char **argv) {
  return 0;
 }
 '''
-        (root / "test.c").write_text(fixture)
+        header = '#include "' + str(ROOT / 'applications/clip/include/upload_perf.h') + '"\n'
+        (root / "test.c").write_text(header + fixture)
         cls.executable = root / "test"
         try:
             subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",

@@ -15,6 +15,7 @@
 #include "https_poc.h"
 #include "config.h"
 #include "https_stream.h"
+#include "upload_perf.h"
 #include "upload_state.h"
 #include "upload_config.h"
 #include "upload_scan.h"
@@ -133,6 +134,9 @@ bool https_poc_command_allowed(const char *name)
 {
     /* Read-only instrumentation must remain available during TLS/upload. */
     if (!strcmp(name, "RES")) { return true; }
+#ifdef CONFIG_CLIP_HTTPS_PROFILE
+    if (!strcmp(name, "UPLOADPERF")) { return true; }
+#endif
     if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) &&
         (!strcmp(name, "NETDIAG") || !strcmp(name, "NETTRACE") || !strcmp(name, "NETTX"))) {
         return true;
@@ -243,10 +247,15 @@ static int hash_file_range(size_t offset, size_t length, char output[65])
     while (!ret && total < length) {
         ret = check_cancel();
         if (ret) { break; }
+        uint64_t measured = upload_perf_now();
         ssize_t n = fs_read(&file, io, MIN(sizeof(io), length - total));
+        upload_perf_add(UP_READ_US, upload_perf_now() - measured);
+        upload_perf_add(UP_FS_READS, 1);
         if (n <= 0) { ret = n < 0 ? (int)n : -EIO; break; }
         total += n;
+        measured = upload_perf_now();
         ret = mbedtls_sha256_update(&hash, io, n);
+        upload_perf_add(UP_HASH_US, upload_perf_now() - measured);
     }
     if (!ret) { ret = mbedtls_sha256_finish(&hash, digest); }
     mbedtls_sha256_free(&hash);
@@ -264,7 +273,10 @@ static int send_payload(struct https_stream *stream, size_t offset, size_t lengt
     while (total < length) {
         int ret = check_cancel();
         if (ret) { return ret; }
+        uint64_t measured = upload_perf_now();
         ssize_t n = fs_read(&file, io, MIN(sizeof(io), length - total));
+        upload_perf_add(UP_READ_US, upload_perf_now() - measured);
+        upload_perf_add(UP_FS_READS, 1);
         if (n <= 0) { return n < 0 ? (int)n : -EIO; }
         ret = https_stream_write(stream, io, n);
         if (ret) { return ret; }
@@ -349,7 +361,7 @@ static int receive_receipt(struct https_stream *stream, int expected_offset)
     return accept_receipt(receipt.status, receipt.size, receipt.sha256, receipt.offset, expected_offset);
 }
 
-static int request_chunk(struct https_stream *stream, bool query, size_t offset, size_t length)
+static int request_chunk_impl(struct https_stream *stream, bool query, size_t offset, size_t length)
 {
     char chunk_header[90] = {0};
     if (!query) {
@@ -358,6 +370,7 @@ static int request_chunk(struct https_stream *stream, bool query, size_t offset,
         if (ret) { return ret; }
         snprintf(chunk_header, sizeof(chunk_header), "X-Chunk-SHA256: %s\r\n", digest);
     }
+    uint64_t measured = upload_perf_now();
     int n = snprintf((char *)io, sizeof(io),
         "%s /v2/devices/%s/recordings/%s/%u HTTP/1.1\r\n"
         "Host: %s:%s\r\nAuthorization: Bearer %s\r\n"
@@ -371,14 +384,28 @@ static int request_chunk(struct https_stream *stream, bool query, size_t offset,
     if (n < 0 || (size_t)n >= sizeof(io)) { return -EMSGSIZE; }
     progress();
     int ret = https_stream_write(stream, io, n);
+    upload_perf_add(UP_HEADER_US, upload_perf_now() - measured);
     memset(io, 0, sizeof(io));
     if (ret) { return ret; }
     if (!query) {
         /* Hashing rewound the file; request formatting only reused the buffer. */
+        measured = upload_perf_now();
         ret = send_payload(stream, offset, length);
+        upload_perf_add(UP_BODY_US, upload_perf_now() - measured);
         if (ret < 0) { return ret; }
     }
-    return receive_receipt(stream, query ? -1 : (int)(offset + length));
+    measured = upload_perf_now();
+    ret = receive_receipt(stream, query ? -1 : (int)(offset + length));
+    upload_perf_add(UP_RECEIPT_US, upload_perf_now() - measured);
+    return ret;
+}
+
+static int request_chunk(struct https_stream *stream, bool query, size_t offset, size_t length)
+{
+    upload_perf_begin(query ? UP_GET : UP_PUT, session, segment, offset, length);
+    int ret = request_chunk_impl(stream, query, offset, length);
+    upload_perf_end(ret);
+    return ret;
 }
 
 static int upload(struct https_stream *stream)
@@ -557,10 +584,12 @@ static bool next_auto_file(void)
 }
 static int refill_auto_batch(void)
 {
+    upload_perf_begin(UP_SCAN, NULL, 0, 0, 0);
     memset(auto_batch, 0, sizeof(*auto_batch));
     int ret = destination_digest(auto_batch->destination);
     if (!ret) { ret = upload_scan(choose_visit, auto_batch, check_cancel); }
     if (!ret) { ret = check_cancel(); }
+    upload_perf_end(ret);
     k_mutex_lock(&control_lock, K_FOREVER);
     scan_error = ret;
     k_mutex_unlock(&control_lock);
@@ -742,6 +771,7 @@ static void schedule_after_job(int ret)
 /* Upload one file; the batch owns Wi-Fi/TLS and recording/storage exclusion. */
 static int upload_file(struct https_stream **stream)
 {
+    upload_perf_begin(UP_PREPARE, session, segment, 0, 0);
     atomic_set(&tls_step, *stream ? TLS_SETUP_HTTP : TLS_SETUP_IDLE);
     atomic_set(&stage, PREPARING);
     atomic_clear(&bytes_sent); atomic_clear(&confirmed); atomic_clear(&resume_from);
@@ -769,21 +799,32 @@ static int upload_file(struct https_stream **stream)
         ret = destination_digest(stamp.destination_sha256);
         if (!ret) {
             state_ready = true;
+            uint64_t measured = upload_perf_now();
             ret = upload_state_save(session, segment, &stamp);
+            upload_perf_add(UP_STATE_US, upload_perf_now() - measured);
             atomic_set(&state_error, ret);
         }
     }
     if (!ret) { ret = check_cancel(); }
+    upload_perf_end(ret);
     if (!ret && !wifi_is_sta_connected()) {
+        upload_perf_begin(UP_WIFI, session, segment, 0, 0);
         https_stream_close(*stream); *stream = NULL;
         atomic_set(&stage, CONNECTING);
         ret = wifi_station_connect(ssid, password, &cancelled);
+        upload_perf_end(ret);
     }
-    if (!ret) { ret = sync_upload_time(); }
+    if (!ret) {
+        upload_perf_begin(UP_CLOCK, session, segment, 0, 0);
+        ret = sync_upload_time();
+        upload_perf_end(ret);
+    }
     bool reused = *stream != NULL;
     if (!ret && !*stream) {
+        upload_perf_begin(UP_TLS, session, segment, 0, 0);
         atomic_set(&stage, TLS);
         ret = tls_connect(stream);
+        upload_perf_end(ret);
     }
     if (!ret) {
         atomic_set(&tls_step, TLS_SETUP_HTTP);
@@ -795,10 +836,13 @@ static int upload_file(struct https_stream **stream)
                        ret == -ENOTCONN) && !check_cancel()) {
             https_stream_close(*stream); *stream = NULL;
             atomic_set(&stage, TLS);
+            upload_perf_begin(UP_TLS, session, segment, 0, 0);
             ret = tls_connect(stream);
+            upload_perf_end(ret);
             if (!ret) { atomic_set(&tls_step, TLS_SETUP_HTTP); ret = upload(*stream); }
         }
     }
+    upload_perf_begin(UP_CLEANUP, session, segment, atomic_get(&confirmed), file_length);
     struct k_work_sync sync;
     k_work_cancel_delayable_sync(&stall_work, &sync);
     if (opened) {
@@ -816,7 +860,11 @@ static int upload_file(struct https_stream **stream)
         } else if (stamp.confirmed) { stamp.state = UPLOAD_PARTIAL; }
         else { stamp.state = ret == -ECANCELED ? UPLOAD_PENDING : UPLOAD_FAILED; }
         int saved = atomic_get(&cleanup_error);
-        if (!saved) { saved = upload_state_save(session, segment, &stamp); }
+        if (!saved) {
+            uint64_t measured = upload_perf_now();
+            saved = upload_state_save(session, segment, &stamp);
+            upload_perf_add(UP_STATE_US, upload_perf_now() - measured);
+        }
         atomic_set(&state_error, saved);
         /* Never release a queued recording until file handles and metadata
          * cleanup are known to have completed. */
@@ -826,6 +874,7 @@ static int upload_file(struct https_stream **stream)
     if (!ret && !response_keep_alive) {
         https_stream_close(*stream); *stream = NULL;
     }
+    upload_perf_end(ret);
     return ret;
 }
 
@@ -947,6 +996,13 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
     int ret = 0;
     char args[256] = {0};
     if (ctx->transport_type != TRANSPORT_TYPE_USB) { ret = -EACCES; goto reply; }
+#ifdef CONFIG_CLIP_HTTPS_PROFILE
+    if (!strcmp(ctx->name, "UPLOADPERF")) {
+        ret = upload_perf_command(ctx->args, https_poc_active() || https_poc_record_pending(), response, length);
+        if (ret >= 0) { return ret; }
+        goto reply;
+    }
+#endif
     if (!strcmp(ctx->name, "UPLOAD") && ctx->type != AT_CMD_TYPE_SET) { goto reply; }
     if (!strcmp(ctx->name, "UPLOADAUTO") && ctx->type != AT_CMD_TYPE_SET) {
         return snprintf(response, length,
@@ -1059,6 +1115,9 @@ int https_poc_register(void)
         {"UPLOADAUTO", AT_CMD_SET | AT_CMD_QUERY, command},
         {"UPLOADSAVE", AT_CMD_EXEC, command}, {"UPLOADCLEAR", AT_CMD_EXEC, command},
         {"UPLOADCLOCK", AT_CMD_SET, command},
+#ifdef CONFIG_CLIP_HTTPS_PROFILE
+        {"UPLOADPERF", AT_CMD_SET, command},
+#endif
     };
     for (size_t i = 0; i < ARRAY_SIZE(commands); i++) {
         ret = at_server_register_cmd(&commands[i]);

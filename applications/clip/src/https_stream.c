@@ -9,6 +9,7 @@
 #include <mbedtls/net_sockets.h>
 #include <psa/crypto.h>
 #include <errno.h>
+#include "upload_perf.h"
 
 #define WAIT_SLICE_MS 50
 #define IO_TIMEOUT_MS 15000
@@ -57,7 +58,10 @@ static int wait_ready(struct https_stream *s, int want, int64_t end)
             .fd = s->socket,
             .events = want == MBEDTLS_ERR_SSL_WANT_READ ? ZSOCK_POLLIN : ZSOCK_POLLOUT,
         };
+        uint64_t measured = upload_perf_now();
         ret = zsock_poll(&pfd, 1, (int)MIN(remaining, WAIT_SLICE_MS));
+        upload_perf_add(want == MBEDTLS_ERR_SSL_WANT_READ ? UP_WAIT_READ_US : UP_WAIT_WRITE_US,
+                        upload_perf_now() - measured);
         if (ret < 0) {
             if (errno == EINTR) { continue; }
             return -errno;
@@ -135,7 +139,9 @@ int https_stream_open(struct https_stream **out, const struct sockaddr *address,
     for (;;) {
         ret = check();
         if (ret) { goto fail; }
+        uint64_t measured = upload_perf_now();
         ret = mbedtls_ssl_handshake(&s->ssl);
+        upload_perf_add(UP_HANDSHAKE_US, upload_perf_now() - measured);
         if (!ret) { break; }
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             ret = -EACCES; goto fail;
@@ -160,11 +166,15 @@ int https_stream_write(struct https_stream *s, const void *data, size_t length)
     while (length) {
         int ret = s->check();
         if (ret) { return ret; }
+        uint64_t measured = upload_perf_now();
         ret = mbedtls_ssl_write(&s->ssl, cursor, length);
+        upload_perf_add(UP_SSL_WRITE_US, upload_perf_now() - measured);
+        upload_perf_add(UP_WRITE_CALLS, 1);
         if (ret > 0) { cursor += ret; length -= ret; continue; }
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             return -EIO;
         }
+        upload_perf_add(ret == MBEDTLS_ERR_SSL_WANT_READ ? UP_WANT_READ : UP_WANT_WRITE, 1);
         ret = wait_ready(s, ret, end);
         if (ret) { return ret; }
     }
@@ -177,12 +187,16 @@ ssize_t https_stream_read(struct https_stream *s, void *data, size_t length)
     for (;;) {
         int ret = s->check();
         if (ret) { return ret; }
+        uint64_t measured = upload_perf_now();
         ret = mbedtls_ssl_read(&s->ssl, data, length);
+        upload_perf_add(UP_SSL_READ_US, upload_perf_now() - measured);
+        upload_perf_add(UP_READ_CALLS, 1);
         if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) { return 0; }
         if (ret >= 0) { return ret; }
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) {
             return -EIO;
         }
+        upload_perf_add(ret == MBEDTLS_ERR_SSL_WANT_READ ? UP_WANT_READ : UP_WANT_WRITE, 1);
         ret = wait_ready(s, ret, end);
         if (ret) { return ret; }
     }

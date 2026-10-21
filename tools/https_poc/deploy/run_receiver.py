@@ -10,6 +10,7 @@ import ssl
 import threading
 
 from server import Receiver
+from profile_timing import FileSink
 
 
 class BoundedReceiver(Receiver):
@@ -39,6 +40,7 @@ def main():
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--port', type=int, default=9527)
     parser.add_argument('--device', required=True)
+    parser.add_argument('--profile-log', type=Path, help='exclusive bounded timing output; disabled by default')
     args = parser.parse_args()
     token = (args.root / 'private/token').read_text().strip()
     if not re.fullmatch(r'[A-Za-z0-9_-]{32,96}', token):
@@ -46,6 +48,8 @@ def main():
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', args.device):
         parser.error('invalid device identity')
     server = BoundedReceiver(('0.0.0.0', args.port), args.root / 'data', args.device, token)
+    sink = FileSink(args.profile_log) if args.profile_log else None
+    server.profile_sink = sink
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(args.root / 'private/server-chain.pem', args.root / 'private/server.key')
@@ -56,6 +60,8 @@ def main():
         server.serve_forever()
     finally:
         server.server_close()
+        if sink:
+            sink.close()
 
 
 if __name__ == '__main__':

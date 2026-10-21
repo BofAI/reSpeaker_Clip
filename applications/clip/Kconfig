@@ -20,6 +20,14 @@ config CLIP_HTTPS_POC
 	  Station-only, stopped-recording upload. Uses CDC-only USB and disables
 	  application OTA during this experiment. Requires a supplied test CA.
 
+config CLIP_HTTPS_PROFILE
+	bool "Passive upload phase timing via USB"
+	depends on CLIP_HTTPS_POC
+	default n
+	help
+	  Opt-in bounded RAM event ring; no audio or credential logging.
+	  Disabled builds compile timing hooks to no-ops.
+
 config CLIP_HTTPS_STA_PS_OFF
 	bool "Disable station power save before experimental HTTPS upload"
 	depends on CLIP_HTTPS_POC

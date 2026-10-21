@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from profile_timing import measure, timed_lock
 
 MAX_FILE = 8 * 1024 * 1024
 MAX_CHUNK = 16 * 1024
@@ -34,11 +35,16 @@ class ResumeStore:
     def _sync_directory(self):
         fd = os.open(self.directory, os.O_RDONLY)
         try:
-            os.fsync(fd)
+            with measure('directory_fsync_us'):
+                os.fsync(fd)
         finally:
             os.close(fd)
 
     def _save(self, path, state):
+        with measure('checkpoint_us'):
+            return self._save_impl(path, state)
+
+    def _save_impl(self, path, state):
         temporary = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", dir=self.directory,
@@ -46,7 +52,8 @@ class ResumeStore:
                 temporary = Path(output.name)
                 json.dump(state, output, separators=(",", ":"))
                 output.flush()
-                os.fsync(output.fileno())
+                with measure('checkpoint_fsync_us'):
+                    os.fsync(output.fileno())
             os.replace(temporary, path)
             temporary = None
             self._sync_directory()
@@ -56,6 +63,11 @@ class ResumeStore:
 
     @staticmethod
     def _hash(path):
+        with measure('whole_hash_us'):
+            return ResumeStore._hash_impl(path)
+
+    @staticmethod
+    def _hash_impl(path):
         digest = hashlib.sha256()
         with path.open("rb") as source:
             for block in iter(lambda: source.read(MAX_CHUNK), b""):
@@ -132,17 +144,21 @@ class ResumeStore:
         return paths, state, False
 
     def status(self, object_id, size, digest):
-        with self.lock:
-            _, state, stored = self._load(object_id, size, digest)
+        with timed_lock(self.lock):
+            with measure('load_us'):
+                _, state, stored = self._load(object_id, size, digest)
             return self._receipt(state, stored)
 
     def commit(self, object_id, size, digest, offset, data, chunk_hash):
         if not 0 < len(data) <= MAX_CHUNK or not 0 <= offset < offset + len(data) <= size:
             raise ResumeError(400, "invalid_chunk")
-        if hashlib.sha256(data).hexdigest() != chunk_hash:
+        with measure('chunk_hash_us'):
+            actual_hash = hashlib.sha256(data).hexdigest()
+        if actual_hash != chunk_hash:
             raise ResumeError(422, "chunk_hash_mismatch")
-        with self.lock:
-            paths, state, stored = self._load(object_id, size, digest)
+        with timed_lock(self.lock):
+            with measure('load_us'):
+                paths, state, stored = self._load(object_id, size, digest)
             target, partial, checkpoint = paths
             if offset < state["offset"] and offset + len(data) <= state["offset"]:
                 with (target if stored else partial).open("rb") as existing:
@@ -157,10 +173,12 @@ class ResumeStore:
             fd = os.open(partial, os.O_RDWR | os.O_CREAT, 0o600)
             with os.fdopen(fd, "r+b") as output:
                 output.seek(offset)
-                if output.write(data) != len(data):
-                    raise OSError("short file write")
-                output.flush()
-                os.fsync(output.fileno())
+                with measure('data_write_us'):
+                    if output.write(data) != len(data):
+                        raise OSError("short file write")
+                    output.flush()
+                with measure('data_fsync_us'):
+                    os.fsync(output.fileno())
             state = dict(state, offset=offset + len(data))
             self._save(checkpoint, state)
             if state["offset"] == size:

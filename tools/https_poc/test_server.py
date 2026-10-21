@@ -230,6 +230,32 @@ class ReceiverTest(unittest.TestCase):
         finally:
             conn.close()
 
+    def test_profile_receipts_match_wire_and_exclude_credentials(self):
+        records = []
+        self.server.profile_sink = records.append
+        try:
+            recording = b'profile-payload' * 1200
+            self.assertEqual(self.resume_request('GET', 599, recording)[0], 200)
+            for offset in range(0, len(recording), MAX_CHUNK):
+                block = recording[offset:offset + MAX_CHUNK]
+                code, receipt = self.resume_request('PUT', 599, recording, offset, block)
+                self.assertIn(code, (200, 201))
+            end = time.monotonic() + 2
+            while len(records) < 3 and time.monotonic() < end:
+                time.sleep(.01)
+            self.assertEqual(len(records), 3)
+            self.assertEqual([r['status'] for r in records], [200, 200, 201])
+            self.assertEqual(records[1]['offset'], 0)
+            self.assertEqual(records[2]['offset'], MAX_CHUNK)
+            self.assertIn('data_fsync_us', records[1])
+            self.assertIn('body_receive_us', records[1])
+            self.assertIn('response_write_us', records[1])
+            self.assertNotIn(self.token, json.dumps(records))
+            self.assertNotIn('profile-payload', json.dumps(records))
+            self.assertEqual(receipt['sha256'], hashlib.sha256(recording).hexdigest())
+        finally:
+            self.server.profile_sink = None
+
     def test_partial_resume_survives_new_receiver(self):
         recording = b"payload" * 5000
         self.assertEqual(self.resume_request("PUT", 502, recording, 0, recording[:MAX_CHUNK])[0], 200)
