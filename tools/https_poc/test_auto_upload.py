@@ -84,8 +84,8 @@ int main(void){
 
     def test_round_robin_backoff_busy_cancel_and_uploaded_filter(self):
         source = (ROOT/'applications/clip/src/https_poc.c').read_text()
-        choose = source[source.index('struct candidate {'):source.index('/* Two records per page')]
-        schedule = 'static void schedule_after_job' + source.split('static void schedule_after_job', 1)[1].split('static void worker', 1)[0]
+        choose = source[source.index('#define AUTO_BATCH_FILES'):source.index('/* Two records per page')]
+        schedule = 'static void schedule_after_job' + source.split('static void schedule_after_job', 1)[1].split('/* Upload one file;', 1)[0]
         code = r'''
 #include <assert.h>
 #include <stdbool.h>
@@ -108,6 +108,9 @@ static int scan_error,stage,last_error,scan_failure,metadata_failure,busy,cancel
 static uint32_t failures,cursor_segment,segment;
 static char cursor_session[15],session[32];
 static int64_t next_auto,deadline,now;
+static int allocation_failure;
+static void *k_calloc(size_t n,size_t size){return allocation_failure?NULL:calloc(n,size);}
+static void k_free(void *p){free(p);}
 enum {CANCELLED,FAILED,IDLE};
 enum {CLIP_EVENT_UPLOAD_BEGIN,CLIP_EVENT_UPLOAD_END,CLIP_EVENT_OK};
 struct clip_event_result_info {int result;};
@@ -146,6 +149,7 @@ static int upload_state_load(const char *id,uint32_t number,struct upload_file_r
 }
 typedef int (*visit_fn)(const char*,uint32_t,uint32_t,bool,void*);
 static int upload_scan(visit_fn visit,void *context,int (*check)(void)){
+ assert(!control_lock); /* Status/off commands are not locked out by the scan. */
  if(scan_failure)return scan_failure;
  for(unsigned i=0;i<sizeof(items)/sizeof(items[0]);i++){
   int ret=check();if(ret)return ret;visited++;
@@ -175,8 +179,29 @@ int main(void){
  now=next_auto;scan_failure=-ECANCELED;assert(!begin_auto()&&!active&&stage==CANCELLED);scan_failure=0;
  for(unsigned i=0;i<sizeof(items)/sizeof(items[0]);i++)items[i].state=UPLOAD_STORED;
  now=next_auto;assert(!begin_auto()&&!active&&next_auto==now+300000);
- struct selection select={0};memset(select.destination,0x33,32);assert(choose_visit(items[0].id,1,60975,true,&select)==0&&select.first.session[0]);
- memset(&select,0,sizeof(select));memset(select.destination,0x22,32);assert(choose_visit(items[0].id,1,60974,true,&select)==0&&select.first.session[0]);
+ struct selection select={0};memset(select.destination,0x33,32);assert(choose_visit(items[0].id,1,60975,true,&select)==0&&select.first[0].session[0]);
+ memset(&select,0,sizeof(select));memset(select.destination,0x22,32);assert(choose_visit(items[0].id,1,60974,true,&select)==0&&select.first[0].session[0]);
+ memset(&select,0,sizeof(select));
+ for(unsigned n=20;n>8;n--)add_candidate(select.first,&select.first_count,items[0].id,n);
+ assert(select.first_count==AUTO_BATCH_FILES);
+ for(unsigned n=0;n<AUTO_BATCH_FILES;n++)assert(select.first[n].segment==n+9);
+ add_candidate(select.first,&select.first_count,items[0].id,9);
+ assert(select.first_count==AUTO_BATCH_FILES&&select.first[1].segment==10);
+ auto_batch=k_calloc(1,sizeof(*auto_batch));auto_batch->first_count=2;
+ add_candidate(auto_batch->first,&auto_batch->after_count,items[0].id,9);
+ add_candidate(auto_batch->first,&auto_batch->after_count,items[0].id,10);
+ deadline=now+300000;
+ assert(next_auto_file()&&segment==9&&auto_batch->index==1);
+ cancel=1;assert(!next_auto_file()&&auto_batch->index==1);cancel=0;
+ assert(next_auto_file()&&segment==10&&auto_batch->index==2);
+ assert(!next_auto_file());
+ assert(refill_auto_batch()==0); /* All persisted items are already stored. */
+ items[0].state=UPLOAD_PENDING;
+ assert(refill_auto_batch()==1&&auto_batch->first_count==1);
+ assert(next_auto_file()&&segment==1); /* Wrap discovers earlier/new work. */
+ items[0].state=UPLOAD_STORED;assert(refill_auto_batch()==0);
+ k_free(auto_batch);auto_batch=NULL;
+ allocation_failure=1;now=next_auto;assert(!begin_auto()&&!active&&!auto_job&&scan_error==-ENOMEM&&!auto_batch);
  return 0;
 }
 '''
@@ -327,7 +352,7 @@ int main(void){
 
     def test_cursor_pages_select_two_records_in_one_scan_without_duplicates(self):
         source = (ROOT/'applications/clip/src/https_poc.c').read_text()
-        compare = 'static int compare_key' + source.split('static int compare_key', 1)[1].split('static int choose_visit', 1)[0]
+        compare = 'static int compare_key' + source.split('static int compare_key', 1)[1].split('static void add_candidate', 1)[0]
         valid = 'static bool valid_session' + source.split('static bool valid_session', 1)[1].split('static int hash_file_range', 1)[0]
         listing = source[source.index('struct list_item {'):source.index('/* SNTP supplies wall time')]
         code = r'''

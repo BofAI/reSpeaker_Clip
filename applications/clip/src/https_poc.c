@@ -81,6 +81,7 @@ static struct upload_buffers {
 static char expected_hash[65];
 static size_t response_length, file_length, header_bytes;
 static bool response_final;
+static bool response_keep_alive;
 static int response_status;
 
 /* Wall time uses libc time()/CLOCK_REALTIME; TLS timers use monotonic uptime. */
@@ -296,6 +297,7 @@ static int body_fragment(struct http_parser *parser, const char *at, size_t leng
 static int message_complete(struct http_parser *parser)
 {
     response_status = parser->status_code;
+    response_keep_alive = http_should_keep_alive(parser);
     response_final = true;
     return check_cancel();
 }
@@ -331,7 +333,7 @@ static int receive_receipt(struct https_stream *stream, int expected_offset)
         int ret = check_cancel();
         if (ret) { return ret; }
         if (HTTP_PARSER_ERRNO(&parser) != HPE_OK || used != (size_t)count) { return -EBADMSG; }
-        if (!count && !response_final) { return -EBADMSG; }
+        if (!count && !response_final) { return -ECONNRESET; }
     }
     atomic_set(&stage, VERIFYING);
     if (response_status != 200 && (expected_offset < 0 || response_status != 201)) { return -EBADMSG; }
@@ -360,10 +362,11 @@ static int request_chunk(struct https_stream *stream, bool query, size_t offset,
         "%s /v2/devices/%s/recordings/%s/%u HTTP/1.1\r\n"
         "Host: %s:%s\r\nAuthorization: Bearer %s\r\n"
         "X-Recording-Size: %u\r\nX-Content-SHA256: %s\r\n"
-        "Upload-Offset: %u\r\n%sConnection: keep-alive\r\n"
+        "Upload-Offset: %u\r\n%s%sConnection: keep-alive\r\n"
         "Content-Type: application/octet-stream\r\nContent-Length: %u\r\n\r\n",
         query ? "GET" : "PUT", device_id, session, segment, host, port, token,
         (unsigned int)file_length, expected_hash, (unsigned int)offset, chunk_header,
+        atomic_get(&auto_job) ? "X-Clip-Batch: 1\r\n" : "",
         (unsigned int)length);
     if (n < 0 || (size_t)n >= sizeof(io)) { return -EMSGSIZE; }
     progress();
@@ -498,14 +501,33 @@ static int state_query(const char *args, char *response, size_t length)
         loaded == -EBADMSG ? loaded : 0, hash);
 }
 
-/* Lexicographic cursor gives every pending file a turn, including after a
- * per-file failure. Every pass sees newly added files; there is no fixed queue cap. */
+/* Keep only the nearest bounded batch, never the whole recording inventory.
+ * A cancelled/failed batch is discarded; its next scan uses the last attempted
+ * key so files after a failure still get a turn. */
+#define AUTO_BATCH_FILES 8
 struct candidate { char session[15]; uint32_t segment; };
-struct selection { struct candidate first, after; uint8_t destination[32]; };
+struct selection {
+    struct candidate first[AUTO_BATCH_FILES], after[AUTO_BATCH_FILES];
+    uint8_t destination[32];
+    unsigned first_count, after_count, index;
+};
+static struct selection *auto_batch;
 static int compare_key(const char *a, uint32_t an, const char *b, uint32_t bn)
 {
     int ret = strcmp(a, b);
     return ret ? ret : an < bn ? -1 : an > bn ? 1 : 0;
+}
+static void add_candidate(struct candidate *items, unsigned *count,
+                          const char *id, uint32_t number)
+{
+    unsigned at = 0;
+    while (at < *count && compare_key(items[at].session, items[at].segment, id, number) < 0) { at++; }
+    if (at == AUTO_BATCH_FILES || (at < *count &&
+        compare_key(items[at].session, items[at].segment, id, number) == 0)) { return; }
+    unsigned used = MIN(*count, AUTO_BATCH_FILES - 1);
+    memmove(items + at + 1, items + at, (used - at) * sizeof(*items));
+    strcpy(items[at].session, id); items[at].segment = number;
+    *count = MIN(*count + 1, AUTO_BATCH_FILES);
 }
 static int choose_visit(const char *id, uint32_t number, uint32_t size, bool sealed, void *context)
 {
@@ -516,16 +538,38 @@ static int choose_visit(const char *id, uint32_t number, uint32_t size, bool sea
     if (ret && ret != -ENOENT && ret != -EBADMSG) { return ret; }
     if (!ret && record.state == UPLOAD_STORED && record.size == size &&
         !memcmp(record.destination_sha256, selection->destination, 32)) { return 0; }
-    if (!selection->first.session[0] ||
-        compare_key(id, number, selection->first.session, selection->first.segment) < 0) {
-        strcpy(selection->first.session, id); selection->first.segment = number;
-    }
-    if (compare_key(id, number, cursor_session, cursor_segment) > 0 &&
-        (!selection->after.session[0] ||
-         compare_key(id, number, selection->after.session, selection->after.segment) < 0)) {
-        strcpy(selection->after.session, id); selection->after.segment = number;
+    add_candidate(selection->first, &selection->first_count, id, number);
+    if (compare_key(id, number, cursor_session, cursor_segment) > 0) {
+        add_candidate(selection->after, &selection->after_count, id, number);
     }
     return 0;
+}
+static void select_candidate(const struct candidate *next)
+{
+    strcpy(session, next->session); segment = next->segment;
+    strcpy(cursor_session, session); cursor_segment = segment;
+}
+static bool next_auto_file(void)
+{
+    if (check_cancel() || !auto_batch || auto_batch->index >= auto_batch->first_count) { return false; }
+    select_candidate(&auto_batch->first[auto_batch->index++]);
+    return true;
+}
+static int refill_auto_batch(void)
+{
+    memset(auto_batch, 0, sizeof(*auto_batch));
+    int ret = destination_digest(auto_batch->destination);
+    if (!ret) { ret = upload_scan(choose_visit, auto_batch, check_cancel); }
+    if (!ret) { ret = check_cancel(); }
+    k_mutex_lock(&control_lock, K_FOREVER);
+    scan_error = ret;
+    k_mutex_unlock(&control_lock);
+    if (ret) { return ret; }
+    if (auto_batch->after_count) {
+        memcpy(auto_batch->first, auto_batch->after, auto_batch->after_count * sizeof(struct candidate));
+        auto_batch->first_count = auto_batch->after_count;
+    }
+    return auto_batch->first_count ? 1 : 0;
 }
 static int begin_auto(void)
 {
@@ -542,16 +586,21 @@ static int begin_auto(void)
         goto done;
     }
     deadline = k_uptime_get() + 300000;
-    struct selection selection = {0};
-    int ret = destination_digest(selection.destination);
-    if (!ret) { ret = upload_scan(choose_visit, &selection, check_cancel); }
+    atomic_set(&auto_job, 1);
+    auto_batch = k_calloc(1, sizeof(*auto_batch));
+    int ret = auto_batch ? 0 : -ENOMEM;
+    /* Storage is claimed and settings cannot change while active. Let USB
+     * status/off and recording cancellation run during the directory walk. */
+    k_mutex_unlock(&control_lock);
+    if (!ret) { int found = refill_auto_batch(); ret = found < 0 ? found : 0; }
+    k_mutex_lock(&control_lock, K_FOREVER);
     scan_error = ret;
-    struct candidate *next = selection.after.session[0] ? &selection.after : &selection.first;
-    if (!ret && next->session[0]) {
-        strcpy(session, next->session); segment = next->segment;
-        strcpy(cursor_session, session); cursor_segment = segment;
-        atomic_set(&auto_job, 1); wifi_diag_reset(); selected = 1;
+    if (!ret && auto_batch->first_count) {
+        auto_batch->index = 1;
+        select_candidate(&auto_batch->first[0]);
+        wifi_diag_reset(); selected = 1;
     } else {
+        k_free(auto_batch); auto_batch = NULL; atomic_clear(&auto_job);
         atomic_set(&stage, ret == -ECANCELED ? CANCELLED : ret ? FAILED : IDLE);
         atomic_set(&last_error, ret);
         /* STOP/new recordings wake us sooner. Avoid keeping an empty SD awake
@@ -677,6 +726,7 @@ static int sync_upload_time(void)
 static void schedule_after_job(int ret)
 {
         k_mutex_lock(&control_lock, K_FOREVER);
+        k_free(auto_batch); auto_batch = NULL;
         if (atomic_get(&auto_job)) {
             if (!ret) { failures = 0; next_auto = k_uptime_get() + 5000; }
             else if (ret == -ECANCELED) { next_auto = k_uptime_get() + 5000; }
@@ -689,86 +739,134 @@ static void schedule_after_job(int ret)
         k_mutex_unlock(&control_lock);
 }
 
+/* Upload one file; the batch owns Wi-Fi/TLS and recording/storage exclusion. */
+static int upload_file(struct https_stream **stream)
+{
+    atomic_set(&tls_step, *stream ? TLS_SETUP_HTTP : TLS_SETUP_IDLE);
+    atomic_set(&stage, PREPARING);
+    atomic_clear(&bytes_sent); atomic_clear(&confirmed); atomic_clear(&resume_from);
+    atomic_clear(&total_bytes); atomic_clear(&state_error);
+    deadline = k_uptime_get() + 300000;
+    int ret = check_cancel();
+    char path[STORAGE_PATH_MAX];
+    bool opened = false, state_ready = false;
+    struct upload_file_record stamp = {0};
+    struct fs_dirent entry;
+    if (!ret) { ret = storage_ensure_mounted(); }
+    if (!ret) { ret = storage_build_chunk_path(session, segment, path, sizeof(path)); }
+    if (!ret) { ret = fs_stat(path, &entry); }
+    if (!ret && (entry.type != FS_DIR_ENTRY_FILE || !entry.size || entry.size > MAX_FILE)) { ret = -EINVAL; }
+    fs_file_t_init(&file);
+    if (!ret) { ret = fs_open(&file, path, FS_O_READ); opened = ret == 0; }
+    if (!ret) {
+        file_length = entry.size;
+        atomic_set(&total_bytes, file_length);
+        ret = hash_file();
+    }
+    if (!ret) {
+        stamp.size = file_length;
+        digest_bytes(expected_hash, stamp.content_sha256);
+        ret = destination_digest(stamp.destination_sha256);
+        if (!ret) {
+            state_ready = true;
+            ret = upload_state_save(session, segment, &stamp);
+            atomic_set(&state_error, ret);
+        }
+    }
+    if (!ret) { ret = check_cancel(); }
+    if (!ret && !wifi_is_sta_connected()) {
+        https_stream_close(*stream); *stream = NULL;
+        atomic_set(&stage, CONNECTING);
+        ret = wifi_station_connect(ssid, password, &cancelled);
+    }
+    if (!ret) { ret = sync_upload_time(); }
+    bool reused = *stream != NULL;
+    if (!ret && !*stream) {
+        atomic_set(&stage, TLS);
+        ret = tls_connect(stream);
+    }
+    if (!ret) {
+        atomic_set(&tls_step, TLS_SETUP_HTTP);
+        ret = upload(*stream);
+        /* A peer may close an idle reused connection without a close header.
+         * Reconnect once and query the durable offset again; never guess that
+         * an unanswered chunk failed to commit. Protocol/auth errors fail. */
+        if (reused && (ret == -EIO || ret == -ECONNRESET || ret == -EPIPE ||
+                       ret == -ENOTCONN) && !check_cancel()) {
+            https_stream_close(*stream); *stream = NULL;
+            atomic_set(&stage, TLS);
+            ret = tls_connect(stream);
+            if (!ret) { atomic_set(&tls_step, TLS_SETUP_HTTP); ret = upload(*stream); }
+        }
+    }
+    struct k_work_sync sync;
+    k_work_cancel_delayable_sync(&stall_work, &sync);
+    if (opened) {
+        int closed = fs_close(&file);
+        if (closed) { atomic_set(&cleanup_error, closed); }
+        if (!ret) { ret = closed; }
+    }
+    if (atomic_get(&cancelled)) { ret = -ECANCELED; }
+    else if (atomic_get(&stalled)) { ret = -ETIMEDOUT; }
+    if (state_ready) {
+        stamp.confirmed = atomic_get(&confirmed);
+        stamp.last_error = ret;
+        if (stamp.confirmed == stamp.size) {
+            stamp.state = UPLOAD_STORED; stamp.last_error = 0;
+        } else if (stamp.confirmed) { stamp.state = UPLOAD_PARTIAL; }
+        else { stamp.state = ret == -ECANCELED ? UPLOAD_PENDING : UPLOAD_FAILED; }
+        int saved = atomic_get(&cleanup_error);
+        if (!saved) { saved = upload_state_save(session, segment, &stamp); }
+        atomic_set(&state_error, saved);
+        /* Never release a queued recording until file handles and metadata
+         * cleanup are known to have completed. */
+        if (saved && !atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, saved); }
+        if (!ret && saved) { ret = saved; }
+    }
+    if (!ret && !response_keep_alive) {
+        https_stream_close(*stream); *stream = NULL;
+    }
+    return ret;
+}
+
 static void worker(void *a, void *b, void *c)
 {
     ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
     for (;;) {
         if (k_sem_take(&start_job, K_SECONDS(1)) && !begin_auto()) { continue; }
-        atomic_set(&tls_step, TLS_SETUP_IDLE);
-        deadline = k_uptime_get() + 300000;
-        atomic_set(&stage, PREPARING);
-        char path[STORAGE_PATH_MAX];
-        buffers = k_malloc(sizeof(*buffers));
-        int ret = buffers ? storage_ensure_mounted() : -ENOMEM;
-        bool opened = false;
-        bool state_ready = false;
-        struct upload_file_record stamp = {0};
         struct https_stream *stream = NULL;
-        struct fs_dirent entry;
-        if (!ret) { ret = storage_build_chunk_path(session, segment, path, sizeof(path)); }
-        if (!ret) { ret = fs_stat(path, &entry); }
-        if (!ret && (entry.type != FS_DIR_ENTRY_FILE || !entry.size || entry.size > MAX_FILE)) { ret = -EINVAL; }
-        fs_file_t_init(&file);
-        if (!ret) { ret = fs_open(&file, path, FS_O_READ); opened = ret == 0; }
+        buffers = k_malloc(sizeof(*buffers));
+        int ret = buffers ? 0 : -ENOMEM;
         if (!ret) {
-            file_length = entry.size;
-            atomic_set(&total_bytes, file_length);
-            ret = hash_file();
-        }
-        if (!ret) {
-            stamp.size = file_length;
-            digest_bytes(expected_hash, stamp.content_sha256);
-            ret = destination_digest(stamp.destination_sha256);
-            if (!ret) {
-                state_ready = true;
-                ret = upload_state_save(session, segment, &stamp);
-                atomic_set(&state_error, ret);
+            for (;;) {
+                ret = upload_file(&stream);
+                if (ret || !atomic_get(&auto_job) || check_cancel()) { break; }
+                if (next_auto_file()) { continue; }
+                /* The window bounds RAM, not the connection lifetime. Keep
+                 * uploading serially over this connection until no work remains. */
+                deadline = k_uptime_get() + 300000;
+                int found = refill_auto_batch();
+                if (found < 0) {
+                    ret = found;
+                    if (ret != -ECANCELED) { atomic_set(&cleanup_error, ret); }
+                    break;
+                }
+                if (!found || !next_auto_file()) { break; }
             }
         }
-        if (!ret) { ret = check_cancel(); }
-        if (!ret) {
-            atomic_set(&stage, CONNECTING);
-            ret = wifi_station_connect(ssid, password, &cancelled);
-        }
-        if (!ret) { ret = sync_upload_time(); }
-        if (!ret) {
-            atomic_set(&stage, TLS);
-            ret = tls_connect(&stream);
-        }
-        if (!ret) { atomic_set(&tls_step, TLS_SETUP_HTTP); ret = upload(stream); }
         struct k_work_sync sync;
         k_work_cancel_delayable_sync(&stall_work, &sync);
         https_stream_close(stream);
-        atomic_set(&cleanup_error, wifi_off());
-        if (opened) {
-            int close_ret = fs_close(&file);
-            if (!atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, close_ret); }
-        }
-        k_free(buffers);
-        buffers = NULL;
+        int radio = wifi_off();
+        if (!atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, radio); }
+        k_free(buffers); buffers = NULL;
+        if (!ret) { ret = atomic_get(&cleanup_error); }
         if (atomic_get(&cancelled)) { ret = -ECANCELED; }
         else if (atomic_get(&stalled)) { ret = -ETIMEDOUT; }
-        if (state_ready) {
-            stamp.confirmed = atomic_get(&confirmed);
-            stamp.last_error = ret;
-            if (stamp.confirmed == stamp.size) {
-                stamp.state = UPLOAD_STORED;
-                stamp.last_error = 0;
-            } else if (stamp.confirmed) { stamp.state = UPLOAD_PARTIAL; }
-            else { stamp.state = ret == -ECANCELED ? UPLOAD_PENDING : UPLOAD_FAILED; }
-            int saved = atomic_get(&cleanup_error);
-            if (!saved) { saved = upload_state_save(session, segment, &stamp); }
-            atomic_set(&state_error, saved);
-            /* A metadata I/O/close failure must not release a queued start
-             * onto storage whose handle cleanup could not be confirmed. */
-            if (saved && !atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, saved); }
-            if (!ret && saved) { ret = saved; }
-        }
         atomic_set(&last_error, ret);
         atomic_set(&stage, ret == -ECANCELED ? CANCELLED : ret ? FAILED : SUCCEEDED);
         schedule_after_job(ret);
         struct clip_event_result_info result;
-        /* A temporarily full event queue must not strand the storage claim. */
         while (clip_post_event_sync(CLIP_EVENT_UPLOAD_END, &result)) {
             k_sleep(K_MSEC(10));
         }

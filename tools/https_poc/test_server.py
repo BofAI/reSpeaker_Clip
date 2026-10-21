@@ -252,6 +252,36 @@ class ReceiverTest(unittest.TestCase):
             other.server_close()
             worker.join()
 
+    def test_batch_keeps_same_tls_across_complete_files_and_stored_queries(self):
+        conn = http.client.HTTPSConnection("localhost", self.server.server_port,
+                                           context=self.context, timeout=3)
+        try:
+            conn.connect()
+            transport = conn.sock
+            for segment in (601, 602, 603):
+                recording = bytes([segment % 256]) * (MAX_CHUNK + 19)
+                headers = {"X-Clip-Batch": "1"}
+                self.assertEqual(self.resume_request("GET", segment, recording,
+                                                     overrides=headers, conn=conn)[1]["offset"], 0)
+                for offset in range(0, len(recording), MAX_CHUNK):
+                    code, receipt = self.resume_request("PUT", segment, recording, offset,
+                                                       recording[offset:offset+MAX_CHUNK],
+                                                       overrides=headers, conn=conn)
+                    self.assertIn(code, (200, 201))
+                    self.assertIs(conn.sock, transport)
+                self.assertEqual(receipt["status"], "stored")
+                code, receipt = self.resume_request("GET", segment, recording,
+                                                   overrides=headers, conn=conn)
+                self.assertEqual((code, receipt["offset"]), (200, len(recording)))
+                self.assertIs(conn.sock, transport)
+            # Errors retain the old close behavior, even for batch clients.
+            code, _ = self.resume_request("GET", 603, b"conflicting",
+                                          overrides={"X-Clip-Batch": "1"}, conn=conn)
+            self.assertEqual(code, 409)
+            self.assertIsNone(conn.sock)
+        finally:
+            conn.close()
+
     def test_resume_rejects_bad_chunks_without_advancing_checkpoint(self):
         recording = b"a" * (MAX_CHUNK + 100)
         self.assertEqual(self.resume_request("GET", 503, recording,

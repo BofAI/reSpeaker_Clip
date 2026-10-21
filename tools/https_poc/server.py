@@ -61,7 +61,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         keep_alive = (self.path.startswith("/v2/") and
                       getattr(self, "resume_connection", False) and code in (200, 201)
-                      and payload.get("status") != "stored")
+                      and (payload.get("status") != "stored" or
+                           self.headers.get_all("X-Clip-Batch", []) == ["1"]))
         self.send_header("Connection", "keep-alive" if keep_alive else "close")
         self.end_headers()
         self.close_connection = not keep_alive

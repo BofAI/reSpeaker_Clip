@@ -1,0 +1,26 @@
+[Unit]
+Description=Clip HTTPS recording receiver (controlled pilot)
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=%h/clip-receiver/app
+Environment=PYTHONPATH=%h/clip-receiver/app
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -u %h/clip-receiver/app/run_receiver.py --root %h/clip-receiver --port 9527 --device clip-c7bb
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/clip-receiver/data
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=128
+
+[Install]
+WantedBy=default.target
