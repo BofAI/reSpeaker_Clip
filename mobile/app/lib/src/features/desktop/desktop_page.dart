@@ -477,7 +477,7 @@ class _DesktopPageState extends State<DesktopPage> {
         const Text('当前版本', style: TextStyle(fontWeight: FontWeight.bold)),
         const SizedBox(height: 8),
         const Text(
-            'Mac 音频工作台 · 支持本地导入、播放、HTTP 备份与下载。\n支持麦克风录音和自动备份；Clip 蓝牙连接及控制见“Clip 设备”；模型处理尚未接入。'),
+            'Mac 音频工作台 · Beta 1.0.1-beta.1\n支持本地导入、播放、HTTP 备份与下载。\n支持麦克风录音和自动备份；Clip 蓝牙连接及控制见“Clip 设备”；模型处理尚未接入。'),
       ]);
 
   Widget _playbar() => Container(

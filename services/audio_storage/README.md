@@ -1,6 +1,6 @@
 # Boa HTTP 音频存储服务
 
-FastAPI + SQLite + 磁盘音频，单用户自用。与 Clip 官方账号、Azure、ASR 解耦。
+FastAPI + SQLite + 磁盘音频，单用户自用。当前版本 **1.0.1-beta.1**（Beta）。与 Clip 官方账号、Azure、ASR 解耦。
 
 桌面端启动、安装和数据说明见 [完整使用 README](../../README-desktop.md)。
 

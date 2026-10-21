@@ -11,7 +11,10 @@ fi
 APP="$ROOT/mobile/app/build/macos/Build/Products/Release/Boa Voice.app"
 [[ -d "$APP" ]] || { echo "Release app missing: $APP" >&2; exit 1; }
 codesign --verify --deep --strict "$APP"
-VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist")
+# Keep the prerelease suffix; Apple's native bundle version may strip it.
+VERSION=$(sed -n 's/^version: *//p' "$ROOT/mobile/app/pubspec.yaml")
+VERSION="${VERSION%%+*}"
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?$ ]] || { echo 'Invalid version' >&2; exit 1; }
 ARCHS=$(lipo -archs "$APP/Contents/MacOS/Boa Voice")
 if [[ "$ARCHS" == *arm64* && "$ARCHS" == *x86_64* ]]; then
   FLAVOR=universal
@@ -28,8 +31,8 @@ STAGE=$(mktemp -d "${TMPDIR:-/tmp}/boa-dmg.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT
 ditto "$APP" "$STAGE/Boa Voice.app"
 ln -s /Applications "$STAGE/Applications"
-cat > "$STAGE/安装说明.txt" <<'TXT'
-Boa Voice macOS
+cat > "$STAGE/安装说明.txt" <<TXT
+Boa Voice macOS $VERSION
 
 安装：将 Boa Voice.app 拖到 Applications，等待复制完成，再推出此磁盘映像。
 首次使用麦克风与 Clip 蓝牙时，需要允许对应系统权限。
@@ -38,7 +41,7 @@ Boa Voice macOS
 安装及配置说明：
 https://github.com/BofAI/reSpeaker_Clip/blob/boa/macos-desktop-audio-storage/README-desktop.md
 
-此版本用于本机开发与自用，采用本机临时签名，未经过 Apple 公证。
+此 Beta 版本用于本机开发与自用，采用本机临时签名，未经过 Apple 公证。
 TXT
 hdiutil create -volname 'Boa Voice' -srcfolder "$STAGE" -fs HFS+ -format UDZO "$IMAGE"
 hdiutil verify "$IMAGE"

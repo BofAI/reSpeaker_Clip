@@ -29,9 +29,7 @@ HEX = re.compile(r"^[0-9a-f]{64}$")
 def parse_range(value, size):
     m = re.fullmatch(r"bytes=(\d{0,20})-(\d{0,20})", value or "")
     if not m or not any(m.groups()):
-        raise HTTPException(
-            416, "Unsupported range", headers={"Content-Range": f"bytes */{size}"}
-        )
+        raise HTTPException(416, "Unsupported range", headers={"Content-Range": f"bytes */{size}"})
     a, b = m.groups()
     start = int(a) if a else max(0, size - int(b))
     end = min(int(b), size - 1) if a and b else size - 1
@@ -62,7 +60,9 @@ def create_app(root, token, chunk_size=5 * 1024 * 1024, max_size=2 * 1024**3):
         except asyncio.CancelledError:
             pass
 
-    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app = FastAPI(
+        version="1.0.1-beta.1", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan
+    )
     app.state.store = store
 
     @app.middleware("http")
@@ -91,9 +91,7 @@ def create_app(root, token, chunk_size=5 * 1024 * 1024, max_size=2 * 1024**3):
             body.extend(block)
         try:
             data = json.loads(body)
-            name, size, sha, mime = (
-                data[k] for k in ("filename", "size", "sha256", "mime")
-            )
+            name, size, sha, mime = (data[k] for k in ("filename", "size", "sha256", "mime"))
             valid = (
                 isinstance(name, str)
                 and 0 < len(name.encode()) <= 240
@@ -161,9 +159,7 @@ def create_app(root, token, chunk_size=5 * 1024 * 1024, max_size=2 * 1024**3):
                     "INSERT OR REPLACE INTO parts VALUES (?,?,?,?)",
                     (uid, index, sha, count),
                 )
-                db.execute(
-                    "UPDATE uploads SET state='uploading',error=NULL WHERE id=?", (uid,)
-                )
+                db.execute("UPDATE uploads SET state='uploading',error=NULL WHERE id=?", (uid,))
             return {"index": index, "sha256": sha, "size": count}
         finally:
             if tmp is not None:
@@ -180,9 +176,7 @@ def create_app(root, token, chunk_size=5 * 1024 * 1024, max_size=2 * 1024**3):
             result = store.get(uid)
             if start:
                 tasks.add_task(store.finalize, uid)
-            return JSONResponse(
-                result, status_code=200 if result["state"] == "complete" else 202
-            )
+            return JSONResponse(result, status_code=200 if result["state"] == "complete" else 202)
         finally:
             lock.release()
 
@@ -228,10 +222,7 @@ def create_app(root, token, chunk_size=5 * 1024 * 1024, max_size=2 * 1024**3):
         row = recording(uid)
         size, etag = row["size"], f'"{row["sha256"]}"'
         start, end, code = 0, size - 1, 200
-        if (
-            request.headers.get("range")
-            and request.headers.get("if-range", etag) == etag
-        ):
+        if request.headers.get("range") and request.headers.get("if-range", etag) == etag:
             start, end = parse_range(request.headers["range"], size)
             code = 206
         headers = {

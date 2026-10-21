@@ -2,6 +2,16 @@
 
 本分支在 reSpeaker Clip 工程中增加个人音频工作台。桌面端使用 Flutter，服务端使用 Python / FastAPI、SQLite 和磁盘文件；两者通过 HTTP 通信，可独立启动。普通音频管理不需要 Clip 硬件。
 
+## Beta 安装包下载
+
+当前发布版本：**1.0.1-beta.1**。验收完成前统一使用 Beta 版本，GitHub Release 标记为预发布。
+
+- [Release 与所有附件](https://github.com/BofAI/reSpeaker_Clip/releases/tag/boa-desktop-v1.0.1-beta.1)
+- [macOS DMG（Apple Silicon / Intel 通用）](https://github.com/BofAI/reSpeaker_Clip/releases/download/boa-desktop-v1.0.1-beta.1/Boa-Voice-1.0.1-beta.1-macos-universal.dmg)
+- [Server 源码包](https://github.com/BofAI/reSpeaker_Clip/releases/download/boa-desktop-v1.0.1-beta.1/Boa-Audio-Storage-1.0.1-beta.1-source.tar.gz)
+
+双击 DMG，将 App 拖入 Applications。Server 需单独启动，配置步骤见下文。DMG 采用临时签名，未经过 Apple 公证。
+
 ## 当前功能
 
 | 模块 | 能力 |
@@ -94,7 +104,7 @@ open "$HOME/Applications/Boa Voice.app"
 bash scripts/package-macos-dmg.sh
 ```
 
-脚本先构建 `desktop_main.dart`，校验 App 签名，再生成 `dist/Boa-Voice-<版本>-macos-<架构>.dmg` 和 `.sha256`。架构根据实际主程序判断，包含 arm64 和 x86_64 时标记 universal。已有同名安装包时停止，避免意外覆盖。
+脚本先构建 `desktop_main.dart`，校验 App 签名，再生成 `dist/Boa-Voice-<版本>-macos-<架构>.dmg` 和 `.sha256`。文件名保留 pubspec.yaml 中的 Beta 后缀；架构根据实际主程序判断，包含 arm64 和 x86_64 时标记 universal。已有同名安装包时停止，避免意外覆盖。
 
 如果已经完成 Release 构建，可用 `bash scripts/package-macos-dmg.sh --skip-build` 仅打包。打开 DMG，将 Boa Voice.app 拖入 Applications，复制完成后推出映像，再从应用程序启动。更新时先退出旧版；音频及配置位于 App 沙箱，不在 DMG 中。
 
