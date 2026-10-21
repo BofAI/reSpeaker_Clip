@@ -86,6 +86,20 @@ open "$HOME/Applications/Boa Voice.app"
 
 替换前退出运行中的 App。产物使用本机签名，未公证；公开分发需要稳定开发者签名、公证与安装验收。以上不是 App Store 发布流程。使用 `desktop_main.dart` 构建桌面交付版本，原有 `main.dart` 为手机业务入口；`audio_storage_smoke_main.dart` 仅供验证。
 
+## 制作 DMG 安装包
+
+在仓库根目录运行：
+
+```sh
+bash scripts/package-macos-dmg.sh
+```
+
+脚本先构建 `desktop_main.dart`，校验 App 签名，再生成 `dist/Boa-Voice-<版本>-macos-<架构>.dmg` 和 `.sha256`。架构根据实际主程序判断，包含 arm64 和 x86_64 时标记 universal。已有同名安装包时停止，避免意外覆盖。
+
+如果已经完成 Release 构建，可用 `bash scripts/package-macos-dmg.sh --skip-build` 仅打包。打开 DMG，将 Boa Voice.app 拖入 Applications，复制完成后推出映像，再从应用程序启动。更新时先退出旧版；音频及配置位于 App 沙箱，不在 DMG 中。
+
+DMG 仅包含桌面 App，Server 仍按前文单独启动。当前产物为本机临时签名，未经过 Apple 公证；其他 Mac 的首次运行限制和最低系统兼容性仍需验证。
+
 ## 5. 数据和自动上传
 
 - 本地库：Flutter Application Support 下的 `boa_desktop/library`；沙箱安装时位于 `~/Library/Containers/com.boa.voice.desktop/Data/Library/Application Support/` 内。
