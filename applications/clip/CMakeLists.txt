@@ -11,6 +11,7 @@ endif()
 
 target_sources_ifdef(CONFIG_CLIP_RESOURCE_STATS app PRIVATE src/resource_stats.c)
 target_sources_ifdef(CONFIG_CLIP_WIFI_DIAG app PRIVATE src/wifi_diag.c)
+target_sources_ifdef(CONFIG_CLIP_TCP_TRACE app PRIVATE src/tcp_trace.c)
 if(CONFIG_CLIP_WIFI_DIAG)
     target_sources(app PRIVATE src/wifi_trace.c)
     include(wifi-trace.cmake)

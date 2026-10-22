@@ -28,6 +28,15 @@ config CLIP_HTTPS_PROFILE
 	  Opt-in bounded RAM event ring; no audio or credential logging.
 	  Disabled builds compile timing hooks to no-ops.
 
+config CLIP_TCP_TRACE
+	bool "Passive TCP retransmission observations via USB"
+	depends on CLIP_WIFI_DIAG && NET_TCP_CONGESTION_AVOIDANCE && NET_TCP_FAST_RETRANSMIT
+	default n
+	help
+	  Diagnostic image only. Replaces pinned SDK tcp.c with an instrumented
+	  build-local copy. USB enables an 8196-byte bounded RAM ring while idle.
+	  Does not change TCP timers, windows, packet contents or scheduling.
+
 config CLIP_HTTPS_STA_PS_OFF
 	bool "Disable station power save before experimental HTTPS upload"
 	depends on CLIP_HTTPS_POC

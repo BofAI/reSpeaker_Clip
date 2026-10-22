@@ -16,6 +16,9 @@
 #include "config.h"
 #include "https_stream.h"
 #include "upload_perf.h"
+#ifdef CONFIG_CLIP_TCP_TRACE
+#include "tcp_trace.h"
+#endif
 #include "upload_state.h"
 #include "upload_config.h"
 #include "upload_scan.h"
@@ -134,6 +137,9 @@ bool https_poc_command_allowed(const char *name)
 {
     /* Read-only instrumentation must remain available during TLS/upload. */
     if (!strcmp(name, "RES")) { return true; }
+#ifdef CONFIG_CLIP_TCP_TRACE
+    if (!strcmp(name, "TCPTRACE")) { return true; }
+#endif
 #ifdef CONFIG_CLIP_HTTPS_PROFILE
     if (!strcmp(name, "UPLOADPERF")) { return true; }
 #endif
@@ -996,6 +1002,13 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
     int ret = 0;
     char args[256] = {0};
     if (ctx->transport_type != TRANSPORT_TYPE_USB) { ret = -EACCES; goto reply; }
+#ifdef CONFIG_CLIP_TCP_TRACE
+    if (!strcmp(ctx->name, "TCPTRACE")) {
+        ret = clip_tcp_trace_command(ctx->args, https_poc_active() || https_poc_record_pending(), response, length);
+        if (ret >= 0) { return ret; }
+        goto reply;
+    }
+#endif
 #ifdef CONFIG_CLIP_HTTPS_PROFILE
     if (!strcmp(ctx->name, "UPLOADPERF")) {
         ret = upload_perf_command(ctx->args, https_poc_active() || https_poc_record_pending(), response, length);
@@ -1115,6 +1128,9 @@ int https_poc_register(void)
         {"UPLOADAUTO", AT_CMD_SET | AT_CMD_QUERY, command},
         {"UPLOADSAVE", AT_CMD_EXEC, command}, {"UPLOADCLEAR", AT_CMD_EXEC, command},
         {"UPLOADCLOCK", AT_CMD_SET, command},
+#ifdef CONFIG_CLIP_TCP_TRACE
+        {"TCPTRACE", AT_CMD_SET, command},
+#endif
 #ifdef CONFIG_CLIP_HTTPS_PROFILE
         {"UPLOADPERF", AT_CMD_SET, command},
 #endif
