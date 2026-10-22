@@ -70,9 +70,12 @@ class Handler(BaseHTTPRequestHandler):
                       and (payload.get("status") != "stored" or
                            self.headers.get_all("X-Clip-Batch", []) == ["1"]))
         self.send_header("Connection", "keep-alive" if keep_alive else "close")
-        self.end_headers()
         self.close_connection = not keep_alive
-        self.wfile.write(body)
+        # BaseHTTPRequestHandler buffers headers until flush_headers(). Include
+        # the small receipt in that write so Nagle cannot hold a separate body
+        # TLS record while the header record is awaiting an ACK.
+        self._headers_buffer.append(b"\r\n" + body)
+        self.flush_headers()
         identify(status=code)
 
     def authorized(self):

@@ -1,5 +1,6 @@
 import hashlib
 import http.client
+from email.message import Message
 import json
 from pathlib import Path
 import ssl
@@ -11,7 +12,43 @@ from concurrent.futures import ThreadPoolExecutor
 import unittest
 
 from make_credentials import generate
-from server import Receiver, MAX_CHUNK, MAX_FILE
+from server import Handler, Receiver, MAX_CHUNK, MAX_FILE
+
+
+class ReceiptWriteTest(unittest.TestCase):
+    def test_complete_response_is_one_write_with_correct_framing(self):
+        class Writer:
+            def __init__(self):
+                self.writes = []
+
+            def write(self, data):
+                self.writes.append(data)
+                return len(data)
+
+        for code, batch, status, keep in [(200, False, 'partial', True),
+                                          (201, True, 'stored', True),
+                                          (201, False, 'stored', False),
+                                          (409, True, 'conflict', False)]:
+            with self.subTest(code=code, batch=batch):
+                handler = object.__new__(Handler)
+                handler.request_version = 'HTTP/1.1'
+                handler.requestline = 'PUT /v2/test HTTP/1.1'
+                handler.command = 'PUT'
+                handler.path = '/v2/test'
+                handler.resume_connection = True
+                handler.headers = Message()
+                if batch:
+                    handler.headers['X-Clip-Batch'] = '1'
+                handler.wfile = Writer()
+                payload = {'status': status, 'offset': 16384}
+                handler.reply(code, payload)
+                self.assertEqual(len(handler.wfile.writes), 1)
+                head, body = handler.wfile.writes[0].split(b'\r\n\r\n', 1)
+                self.assertEqual(json.loads(body), payload)
+                self.assertIn(f'Content-Length: {len(body)}'.encode(), head)
+                self.assertIn(b'Connection: ' + (b'keep-alive' if keep else b'close'), head)
+                self.assertEqual(handler.close_connection, not keep)
+                self.assertEqual(handler._headers_buffer, [])
 
 
 class ReceiverTest(unittest.TestCase):
