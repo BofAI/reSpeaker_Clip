@@ -17,6 +17,7 @@
 #include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include "at_commands.h"
 #include "at_server.h"
 #include "resource_stats.h"
@@ -473,12 +474,99 @@ static int cmd_mode_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
     }
 }
 
+#ifdef CONFIG_CLIP_WIFI_DIAG
+/* Read only existing log files, with the backend off and the device idle.
+ * The ordinal is stable while logging remains off. Hex keeps UART JSON
+ * framing independent of log text; no caller-supplied path is accepted. */
+static int log_read_page(const char *args, char *response, size_t len)
+{
+    if (!args || args[0] < '0' || args[0] > '9') {
+        return create_json_response(false, "Invalid log page", NULL, response, len);
+    }
+    char *end;
+    errno = 0;
+    unsigned long parsed_index = strtoul(args, &end, 10);
+    if (errno || *end != ',' || parsed_index >= CONFIG_LOG_BACKEND_FS_FILES_LIMIT ||
+        end[1] < '0' || end[1] > '9') {
+        return create_json_response(false, "Invalid log page", NULL, response, len);
+    }
+    errno = 0;
+    unsigned long parsed_offset = strtoul(end + 1, &end, 10);
+    if (errno || *end || parsed_offset > CONFIG_LOG_BACKEND_FS_FILE_SIZE) {
+        return create_json_response(false, "Invalid log offset", NULL, response, len);
+    }
+    unsigned int index = parsed_index, offset = parsed_offset;
+    if (log_fs_active || clip_event_get_state() != CLIP_STATE_IDLE) {
+        return create_json_response(false, "Stop logging and return to idle first", NULL, response, len);
+    }
+#ifdef CONFIG_CLIP_HTTPS_POC
+    if (https_poc_active()) {
+        return create_json_response(false, "Upload is active", NULL, response, len);
+    }
+#endif
+    if (storage_ensure_mounted()) {
+        return create_json_response(false, "SD card not available", NULL, response, len);
+    }
+    struct fs_dir_t dir;
+    struct fs_dirent entry;
+    fs_dir_t_init(&dir);
+    int ret = fs_opendir(&dir, CONFIG_LOG_BACKEND_FS_DIR);
+    if (ret) {
+        return create_json_response(false, "No log directory", NULL, response, len);
+    }
+    unsigned int ordinal = 0;
+    bool found = false;
+    while (!(ret = fs_readdir(&dir, &entry)) && entry.name[0]) {
+        if (entry.type != FS_DIR_ENTRY_FILE ||
+            strncmp(entry.name, CONFIG_LOG_BACKEND_FS_FILE_PREFIX,
+                    strlen(CONFIG_LOG_BACKEND_FS_FILE_PREFIX))) { continue; }
+        if (ordinal++ == index) { found = true; break; }
+    }
+    int closed = fs_closedir(&dir);
+    if (ret || closed || !found || offset > entry.size) {
+        return create_json_response(false, "Log page not available", NULL, response, len);
+    }
+    char path[STORAGE_PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", CONFIG_LOG_BACKEND_FS_DIR, entry.name);
+    if (n < 0 || (size_t)n >= sizeof(path)) {
+        return create_json_response(false, "Log path too long", NULL, response, len);
+    }
+    struct fs_file_t file;
+    fs_file_t_init(&file);
+    ret = fs_open(&file, path, FS_O_READ);
+    if (ret) { return create_json_response(false, "Log open failed", NULL, response, len); }
+    unsigned char bytes[128];
+    ret = fs_seek(&file, offset, FS_SEEK_SET);
+    int count = ret ? ret : fs_read(&file, bytes, sizeof(bytes));
+    closed = fs_close(&file);
+    if (count < 0 || closed) {
+        return create_json_response(false, "Log read failed", NULL, response, len);
+    }
+    static const char digits[] = "0123456789abcdef";
+    char hex[sizeof(bytes) * 2 + 1];
+    for (int i = 0; i < count; i++) {
+        hex[i * 2] = digits[bytes[i] >> 4];
+        hex[i * 2 + 1] = digits[bytes[i] & 15];
+    }
+    hex[count * 2] = 0;
+    char data[384];
+    snprintf(data, sizeof(data), "{\"index\":%u,\"offset\":%u,\"next\":%u,\"eof\":%s,\"hex\":\"%s\"}",
+             index, offset, offset + count, offset + count >= entry.size ? "true" : "false", hex);
+    return create_json_response(true, NULL, data, response, len);
+}
+#endif
+
 /* LOG Command Handler - control the FS (SD card) log backend.
  * AT+LOG=off (default) | info | debug. Default off so the SD can idle-power-off;
  * when on, INF (or DBG) level logs persist to /SD:/LOG. */
 static int cmd_log_handler(struct at_cmd_ctx *ctx, char *response, size_t len)
 {
     if (ctx->type == AT_CMD_TYPE_SET) {
+#ifdef CONFIG_CLIP_WIFI_DIAG
+        if (ctx->args && !strncmp(ctx->args, "read,", 5)) {
+            return log_read_page(ctx->args + 5, response, len);
+        }
+#endif
         if (!ctx->args || strlen(ctx->args) == 0) {
             return create_json_response(false, "Missing log mode", NULL, response, len);
         }

@@ -177,6 +177,9 @@ bool https_poc_command_allowed(const char *name)
                !strcmp(name, "START") || !strcmp(name, "STOP") ||
                !strcmp(name, "GSTAT") || !strcmp(name, "BATT") || !strcmp(name, "VERSION");
     }
+#ifdef CONFIG_CLIP_WIFI_AUTH_LOG
+    if (!strcmp(name, "LOG")) { return true; }
+#endif
     return !strcmp(name, "NETCFG") || !strcmp(name, "UPLOADCFG") ||
            !strcmp(name, "UPTIME") || !strcmp(name, "UPLOAD") ||
            !strcmp(name, "UPLOADCANCEL") || !strcmp(name, "USB") ||

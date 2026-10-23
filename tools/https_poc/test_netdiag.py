@@ -100,7 +100,7 @@ int main(void) {
     ctx.name="NETDIAG";
     char small[8];
     assert(diagnostic(&ctx,small,sizeof(small)) == -AT_ERR_NOMEM && small[0] == 0);
-    const char *bad[]={"", "4", "-1", "10", "0x0", NULL};
+    const char *bad[]={"", "5", "-1", "10", "0x0", NULL};
     for (unsigned i=0;i<sizeof(bad)/sizeof(bad[0]);i++) {
         ctx.args=bad[i]; diagnostic(&ctx,out,sizeof(out));
         assert(strstr(out,"\"ok\":false"));
@@ -119,6 +119,40 @@ int main(void) {
     ctx.args="3"; diagnostic(&ctx,out,sizeof(out)); assert(strstr(out,"\"ok\":false"));
     ctx.args="0"; ctx.transport_type=0;
     diagnostic(&ctx,out,sizeof(out)); assert(strstr(out,"\"ok\":false"));
+    ctx.name="NETDIAG";ctx.args="4";ctx.transport_type=TRANSPORT_TYPE_USB;
+    assert(diagnostic(&ctx,out,sizeof(out))>0);
+    assert(strstr(out,"\"type\":\"wifi_join\"") && strstr(out,"\"valid\":false"));
+    int before_queries=queries;
+    wifi_diag_join_event(WIFI_JOIN_RESULT,17);assert(!join.attempt);
+    wifi_diag_join_begin(true);
+    wifi_diag_join_event(WIFI_JOIN_REQUEST,0);
+    wifi_diag_join_event(WIFI_JOIN_RESULT,17);
+    wifi_diag_join_event(WIFI_JOIN_REQUEST_RETURN,0);
+    wifi_diag_join_event(WIFI_JOIN_RESULT,0);
+    wifi_diag_join_event(WIFI_JOIN_DHCP,0);
+    wifi_diag_join_event(WIFI_JOIN_DISCONNECT,0);
+    wifi_diag_join_event(WIFI_JOIN_DISCONNECTED,3);
+    wifi_diag_join_event(WIFI_JOIN_DISCONNECT_RETURN,-120);
+    wifi_diag_join_event(WIFI_JOIN_DOWN,0);
+    wifi_diag_join_event(WIFI_JOIN_READY,0);
+    assert(join.connect_count==2 && join.first_status==17 && join.connect_status==0 && join.error_status==17);
+    assert(diagnostic(&ctx,out,sizeof(out))>0 && queries==before_queries);
+    assert(strstr(out,"\"error_status\":17") && strstr(out,"\"reason\":3,\"reason_valid\":true"));
+    assert(diagnostic(&ctx,small,sizeof(small))==-AT_ERR_NOMEM && small[0]==0);
+    wifi_diag_reset();assert(join.attempt==1 && join.error_status==17);
+    wifi_diag_join_begin(false);assert(join.attempt==2 && !join.seen && !join.error_status);
+    wifi_diag_join_event(WIFI_JOIN_DISCONNECTED_NO_INFO,0);
+    assert(join.disconnect_count==1 && !join.disconnect_valid);
+    wifi_diag_join_event((enum wifi_join_event)-1,99);assert(!join.error_status);
+    /* Worst-case counters and signed status values must still fit the AT buffer. */
+    memset(&join,0xff,sizeof(join));
+    join.request_result=join.first_status=join.connect_status=join.error_status=INT32_MIN;
+    join.disconnect_result=join.disconnect_reason=join.down_result=INT32_MIN;
+    join.ready_value=join.initial_ready=1;
+    assert(diagnostic(&ctx,out,sizeof(out))>0 && strlen(out)<sizeof(out));
+    wifi_diag_join_begin(false);assert(join.attempt==1); /* Skip zero after wrap. */
+    ctx.name="NETTRACE";diagnostic(&ctx,out,sizeof(out));assert(strstr(out,"\"ok\":false"));
+    ctx.name="NETDIAG";ctx.transport_type=0;diagnostic(&ctx,out,sizeof(out));assert(strstr(out,"\"ok\":false"));
     return 0;
 }
 '''

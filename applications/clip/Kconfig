@@ -520,6 +520,13 @@ config CLIP_DEBUG_STATS
 	help
 	  Print thread stack usage and heap stats every 10 seconds.
 
+config CLIP_WIFI_AUTH_LOG
+	bool "Station authentication log diagnostics"
+	depends on CLIP_WIFI_DIAG && LOG_BACKEND_FS
+	help
+	  Allow the existing LOG command while idle in the upload experiment.
+	  Intended for bounded station-authentication tests, disabled by default.
+
 config CLIP_WIFI_DIAG
 	bool "Passive HTTPS station network diagnostics"
 	depends on CLIP_HTTPS_POC && NET_STATISTICS_USER_API

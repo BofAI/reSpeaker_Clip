@@ -43,6 +43,7 @@ static struct net_mgmt_event_callback wifi_events, ipv4_events;
 static void ready(bool value)
 {
     atomic_set(&radio_ready, value);
+    wifi_diag_join_event(WIFI_JOIN_READY, value);
     if (value) { k_sem_give(&ready_sem); }
 }
 
@@ -52,11 +53,16 @@ static void network_event(struct net_mgmt_event_callback *cb, uint64_t event,
     if (iface != net_if_get_first_wifi()) { return; }
     if (event == NET_EVENT_IPV4_DHCP_BOUND) {
         atomic_set(&got_ip, 1);
+        wifi_diag_join_event(WIFI_JOIN_DHCP, 0);
     } else if (event == NET_EVENT_WIFI_CONNECT_RESULT) {
         const struct wifi_status *s = cb->info;
         if (s->status) { atomic_set(&failure, 1); }
+        wifi_diag_join_event(WIFI_JOIN_RESULT, s->status);
     } else if (event == NET_EVENT_WIFI_DISCONNECT_RESULT) {
         atomic_set(&got_ip, 0);
+        const struct wifi_status *s = cb->info_length >= sizeof(struct wifi_status) ? cb->info : NULL;
+        wifi_diag_join_event(s ? WIFI_JOIN_DISCONNECTED : WIFI_JOIN_DISCONNECTED_NO_INFO,
+                             s ? s->status : 0);
     }
 }
 
@@ -77,6 +83,7 @@ int wifi_init(void)
 
 int wifi_station_connect(const char *ssid, const char *password, atomic_t *cancel)
 {
+    wifi_diag_join_begin(atomic_get(&radio_ready));
     k_spinlock_key_t key = k_spin_lock(&network_lock);
     memset(&last_network, 0, sizeof(last_network));
     k_spin_unlock(&network_lock, key);
@@ -108,7 +115,9 @@ int wifi_station_connect(const char *ssid, const char *password, atomic_t *cance
     };
     net_dhcpv4_start(iface);
     atomic_set(&last_step, STA_CONNECT);
+    wifi_diag_join_event(WIFI_JOIN_REQUEST, 0);
     ret = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &req, sizeof(req));
+    wifi_diag_join_event(WIFI_JOIN_REQUEST_RETURN, ret);
     if (ret) { return ret; }
     atomic_set(&last_step, STA_DHCP);
     while (!atomic_get(&got_ip)) {
@@ -172,13 +181,16 @@ int wifi_off(void)
         atomic_clear(&got_ip);
         return 0;
     }
-    net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
+    wifi_diag_join_event(WIFI_JOIN_DISCONNECT, 0);
+    int requested = net_mgmt(NET_REQUEST_WIFI_DISCONNECT, iface, NULL, 0);
+    wifi_diag_join_event(WIFI_JOIN_DISCONNECT_RETURN, requested);
     net_dhcpv4_stop(iface);
     atomic_clear(&got_ip);
 #ifdef CONFIG_NRF70_SR_COEX
     nrf_wifi_coex_hw_reset();
 #endif
     int ret = net_if_down(iface);
+    wifi_diag_join_event(WIFI_JOIN_DOWN, ret);
     return ret == -EALREADY ? 0 : ret;
 }
 bool wifi_is_interface_up(void)

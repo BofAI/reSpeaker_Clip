@@ -24,6 +24,94 @@ static uint32_t generation;
 static atomic_t link_ok, link_error, link_status;
 static struct net_if_link_cb link_callback;
 
+/* Keep first failure as well as the final result: a later successful event
+ * must not erase the event that set the station's failure flag. An attempt
+ * labels the receive epoch, not an SDK-provided association transaction ID. */
+static struct join_trace {
+    uint32_t attempt, started_ms, seen;
+    int initial_ready;
+    uint32_t request_ms, request_end_ms;
+    int request_result;
+    uint32_t ready_count, ready_ms;
+    int ready_value;
+    uint32_t connect_count, first_ms, connect_ms, error_ms;
+    int first_status, connect_status, error_status;
+    uint32_t dhcp_count, dhcp_ms;
+    uint32_t disconnect_ms, disconnect_end_ms, disconnect_count, disconnected_ms;
+    int disconnect_result, disconnect_reason, disconnect_valid;
+    uint32_t down_ms;
+    int down_result;
+} join;
+static struct k_spinlock join_lock;
+
+void wifi_diag_join_begin(bool initial_ready)
+{
+    uint32_t now = k_uptime_get_32();
+    k_spinlock_key_t key = k_spin_lock(&join_lock);
+    uint32_t attempt = join.attempt + 1U;
+    memset(&join, 0, sizeof(join));
+    join.attempt = attempt ? attempt : 1U;
+    join.started_ms = now;
+    join.initial_ready = initial_ready;
+    k_spin_unlock(&join_lock, key);
+}
+
+void wifi_diag_join_event(enum wifi_join_event event, int status)
+{
+    if ((unsigned int)event >= WIFI_JOIN_EVENTS) { return; }
+    uint32_t now = k_uptime_get_32();
+    k_spinlock_key_t key = k_spin_lock(&join_lock);
+    if (!join.attempt) { k_spin_unlock(&join_lock, key); return; }
+    switch (event) {
+    case WIFI_JOIN_READY:
+        join.ready_count++; join.ready_ms = now; join.ready_value = status; break;
+    case WIFI_JOIN_REQUEST: join.request_ms = now; break;
+    case WIFI_JOIN_REQUEST_RETURN:
+        join.request_end_ms = now; join.request_result = status; break;
+    case WIFI_JOIN_RESULT:
+        if (!join.connect_count) { join.first_ms = now; join.first_status = status; }
+        join.connect_count++; join.connect_ms = now; join.connect_status = status;
+        if (status && !join.error_status) { join.error_ms = now; join.error_status = status; }
+        break;
+    case WIFI_JOIN_DHCP: join.dhcp_count++; join.dhcp_ms = now; break;
+    case WIFI_JOIN_DISCONNECT: join.disconnect_ms = now; break;
+    case WIFI_JOIN_DISCONNECT_RETURN:
+        join.disconnect_end_ms = now; join.disconnect_result = status; break;
+    case WIFI_JOIN_DISCONNECTED:
+    case WIFI_JOIN_DISCONNECTED_NO_INFO:
+        join.disconnect_count++; join.disconnected_ms = now; join.disconnect_reason = status;
+        join.disconnect_valid = event == WIFI_JOIN_DISCONNECTED; break;
+    case WIFI_JOIN_DOWN: join.down_ms = now; join.down_result = status; break;
+    default: break;
+    }
+    join.seen |= 1U << event;
+    k_spin_unlock(&join_lock, key);
+}
+
+static int join_query(char *out, size_t size)
+{
+    k_spinlock_key_t key = k_spin_lock(&join_lock);
+    struct join_trace j = join;
+    k_spin_unlock(&join_lock, key);
+    int n = snprintf(out, size,
+        "{\"ok\":true,\"data\":{\"schema\":1,\"type\":\"wifi_join\",\"valid\":%s,"
+        "\"attempt\":%u,\"started_ms\":%u,\"initial_ready\":%d,\"seen\":%u,"
+        "\"request\":{\"ms\":%u,\"end_ms\":%u,\"result\":%d},"
+        "\"ready\":{\"count\":%u,\"ms\":%u,\"value\":%d},"
+        "\"connect\":{\"count\":%u,\"first_ms\":%u,\"first_status\":%d,\"ms\":%u,\"status\":%d,\"error_ms\":%u,\"error_status\":%d},"
+        "\"dhcp\":{\"count\":%u,\"ms\":%u},"
+        "\"disconnect\":{\"ms\":%u,\"end_ms\":%u,\"result\":%d,\"count\":%u,\"event_ms\":%u,\"reason\":%d,\"reason_valid\":%s},"
+        "\"down\":{\"ms\":%u,\"result\":%d}}}\n",
+        j.attempt ? "true" : "false", j.attempt, j.started_ms, j.initial_ready, j.seen,
+        j.request_ms, j.request_end_ms, j.request_result, j.ready_count, j.ready_ms, j.ready_value,
+        j.connect_count, j.first_ms, j.first_status, j.connect_ms, j.connect_status, j.error_ms, j.error_status,
+        j.dhcp_count, j.dhcp_ms, j.disconnect_ms, j.disconnect_end_ms, j.disconnect_result,
+        j.disconnect_count, j.disconnected_ms, j.disconnect_reason,
+        j.disconnect_valid ? "true" : "false", j.down_ms, j.down_result);
+    if (n < 0 || (size_t)n >= size) { if (size) { out[0] = 0; } return -AT_ERR_NOMEM; }
+    return n;
+}
+
 static void link_done(struct net_if *iface, struct net_linkaddr *dst, int status)
 {
     ARG_UNUSED(dst);
@@ -75,12 +163,14 @@ void wifi_diag_capture(enum wifi_diag_point point, int result)
 static int diagnostic(struct at_cmd_ctx *ctx, char *out, size_t size)
 {
     bool tx = !strcmp(ctx->name, "NETTX");
-    int limit = tx ? WIFI_TX_TRACE_SLOTS : WIFI_DIAG_POINTS;
+    bool joining = !strcmp(ctx->name, "NETDIAG") && ctx->args && !strcmp(ctx->args, "4");
+    int limit = tx ? WIFI_TX_TRACE_SLOTS : WIFI_DIAG_POINTS + (joining ? 1 : 0);
     if (ctx->transport_type != TRANSPORT_TYPE_USB || !ctx->args ||
         ctx->args[0] < '0' || ctx->args[0] >= '0' + limit || ctx->args[1]) {
         return snprintf(out, size, "{\"ok\":false,\"msg\":\"USB diagnostic index required\"}\n");
     }
     unsigned int point = ctx->args[0] - '0';
+    if (joining) { return join_query(out, size); }
     if (tx) {
         struct wifi_tx_trace r;
         uint32_t job, total;

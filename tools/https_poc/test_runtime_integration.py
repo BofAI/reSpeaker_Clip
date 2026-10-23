@@ -183,6 +183,7 @@ int main(void) {
 #include <stdbool.h>
 #include <stddef.h>
 #include <errno.h>
+#include "wifi_diag.h"
 #define CONFIG_NRF70_SR_COEX 1
 #define NET_REQUEST_WIFI_DISCONNECT 1
 struct net_if { bool up; };
@@ -247,6 +248,11 @@ int main(void) {
         assert(!https_poc_command_allowed("PAIR"));
         assert(!https_poc_command_allowed("DELETE"));
         assert(!https_poc_command_allowed("WIFI"));
+#ifdef CONFIG_CLIP_WIFI_AUTH_LOG
+        assert(https_poc_command_allowed("LOG") == !busy);
+#else
+        assert(!https_poc_command_allowed("LOG"));
+#endif
         assert(https_poc_command_allowed("UPLOADSTATE") == !busy);
     }
     assert(!https_poc_command_allowed("NETCFG"));
@@ -256,17 +262,20 @@ int main(void) {
     busy=false;
     pending=true;
     assert(!https_poc_command_allowed("NETCFG"));
+    assert(!https_poc_command_allowed("LOG"));
     assert(https_poc_command_allowed("START"));
     pending=false;
     assert(https_poc_command_allowed("START"));
     return 0;
 }
 '''
-            (root / "test.c").write_text(code)
-            subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
-                            "-fsanitize=address,undefined", "-I"+str(ROOT / "applications/clip/include"), str(root / "test.c"),
-                            "-o", str(root / "test")], check=True)
-            subprocess.run([str(root / "test")], check=True)
+            for auth_log in (False, True):
+                prefix = '#define CONFIG_CLIP_WIFI_AUTH_LOG 1\n' if auth_log else ''
+                (root / "test.c").write_text(prefix + code)
+                subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
+                                "-fsanitize=address,undefined", "-I"+str(ROOT / "applications/clip/include"), str(root / "test.c"),
+                                "-o", str(root / "test")], check=True)
+                subprocess.run([str(root / "test")], check=True)
 
     def test_ip_certificate_matches_only_requested_address(self):
         with tempfile.TemporaryDirectory() as directory:
