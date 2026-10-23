@@ -29,10 +29,11 @@ class DatagramTLS:
     OpenSSL supplies the DTLS record header and encryption. The adapter only
     sends complete encrypted records and feeds received UDP datagrams back.
     """
-    def __init__(self, sock, peer, context):
+    def __init__(self, sock, peer, context, receive_packet=None):
         from OpenSSL import SSL
         self.SSL = SSL
         self.sock, self.peer = sock, peer
+        self.receive_packet = receive_packet
         self.connection = SSL.Connection(context, None)
         self.connection.set_app_data(peer)
         self.connection.set_accept_state()
@@ -67,7 +68,11 @@ class DatagramTLS:
                 self.flush(end)
                 if time.monotonic() >= end:
                     raise TimeoutError('DTLS operation deadline')
-                if select.select([self.sock], [], [], .02)[0]:
+                if self.receive_packet is not None:
+                    packet = self.receive_packet(.02)
+                    if packet is not None:
+                        self.connection.bio_write(packet)
+                elif select.select([self.sock], [], [], .02)[0]:
                     packet, peer = self.sock.recvfrom(65535)
                     if peer == self.peer and len(packet) <= 2048:
                         self.connection.bio_write(packet)

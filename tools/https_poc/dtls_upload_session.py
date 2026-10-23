@@ -10,12 +10,13 @@ from resume_store import ResumeError
 
 
 class UploadSession:
-    def __init__(self, store, identities):
+    def __init__(self, store, identities, claim_owner=None):
         self.store, self.identities = store, identities
         self.writer = None
         self.transfer = None
         self.last_ack = 0
         self.last_received = 0
+        self.claim_owner = claim_owner
 
     def reply(self):
         w = self.writer
@@ -47,6 +48,8 @@ class UploadSession:
             expected = self.identities.get(identity['device'])
             if expected is None or not hmac.compare_digest(supplied, expected):
                 raise ResumeError(403, 'unauthorized_device')
+            if self.claim_owner is not None:
+                self.claim_owner(identity['device'])
             if self.writer and self.transfer == transfer:
                 if self.writer.identity != identity:
                     raise ResumeError(409, 'transfer_identity_conflict')
