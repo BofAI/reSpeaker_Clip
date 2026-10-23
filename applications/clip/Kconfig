@@ -13,6 +13,25 @@ menuconfig CLIP
 
 if CLIP
 
+config CLIP_DTLS_UPLOAD
+	bool "Durable recording upload over DTLS"
+	depends on CLIP_HTTPS_POC
+	select MBEDTLS_SSL_PROTO_DTLS
+	default n
+	help
+	  Full recording application with one authenticated datagram connection,
+	  selective receive credit and server-authoritative durable checkpoints.
+	  Reuses the existing scheduler, configuration and independent A/B state.
+
+config CLIP_DTLS_WINDOW_PACKETS
+	int "Maximum logical DTLS in-flight packets"
+	depends on CLIP_DTLS_UPLOAD
+	range 16 128
+	default 64
+	help
+	  One packet is 1024 bytes. Only retransmission metadata occupies RAM;
+	  payload is reread from SD. Congestion control starts at16 packets.
+
 config CLIP_HTTPS_POC
 	bool "Experimental USB-controlled HTTPS upload"
 	default n

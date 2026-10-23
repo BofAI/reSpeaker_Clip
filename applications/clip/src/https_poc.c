@@ -15,6 +15,13 @@
 #include "https_poc.h"
 #include "config.h"
 #include "https_stream.h"
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+#include "dtls_upload.h"
+static struct dtls_upload *datagram;
+static struct dtls_upload_stats last_datagram;
+static atomic_t datagram_received;
+static uint32_t cache_offset, cache_length;
+#endif
 #include "upload_perf.h"
 #ifdef CONFIG_CLIP_TCP_TRACE
 #include "tcp_trace.h"
@@ -50,7 +57,13 @@ enum { TLS_SETUP_IDLE, TLS_SETUP_DNS, TLS_SETUP_SOCKET, TLS_SETUP_CERTIFICATE,
        TLS_SETUP_RECEIVE_TIMEOUT, TLS_SETUP_HANDSHAKE, TLS_SETUP_HTTP };
 static atomic_t tls_step;
 static const char *const tls_steps[] = {"idle", "resolve", "socket", "certificate",
-    "peer_verify", "hostname", "send_timeout", "receive_timeout", "handshake", "http"};
+    "peer_verify", "hostname", "send_timeout", "receive_timeout", "handshake",
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+    "datagram"
+#else
+    "http"
+#endif
+};
 static K_SEM_DEFINE(start_job, 0, 1);
 static struct upload_config *configuration;
 #define settings (*configuration)
@@ -76,17 +89,24 @@ static struct fs_file_t file;
 /* Allocate only during a job, from the same heap as TLS. This saves static
  * reservation, not peak upload memory; allocation failure is a normal error. */
 static struct upload_buffers {
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+    uint8_t file_io[4096];
+#else
     uint8_t file_io[2048], receive[2048];
     char body[1025];
+#endif
 } *buffers;
 #define io (buffers->file_io)
+static char expected_hash[65];
+static size_t file_length;
+#ifndef CONFIG_CLIP_DTLS_UPLOAD
 #define recv_buffer (buffers->receive)
 #define response_body (buffers->body)
-static char expected_hash[65];
-static size_t response_length, file_length, header_bytes;
+static size_t response_length, header_bytes;
 static bool response_final;
 static bool response_keep_alive;
 static int response_status;
+#endif
 
 /* Wall time uses libc time()/CLOCK_REALTIME; TLS timers use monotonic uptime. */
 mbedtls_ms_time_t mbedtls_ms_time(void) { return k_uptime_get(); }
@@ -142,6 +162,9 @@ bool https_poc_command_allowed(const char *name)
 #endif
 #ifdef CONFIG_CLIP_HTTPS_PROFILE
     if (!strcmp(name, "UPLOADPERF")) { return true; }
+#endif
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+    if (!strcmp(name, "UPLOADNET")) { return true; }
 #endif
     if (IS_ENABLED(CONFIG_CLIP_WIFI_DIAG) &&
         (!strcmp(name, "NETDIAG") || !strcmp(name, "NETTRACE") || !strcmp(name, "NETTX"))) {
@@ -272,6 +295,7 @@ static int hash_file_range(size_t offset, size_t length, char output[65])
 
 static int hash_file(void) { return hash_file_range(0, file_length, expected_hash); }
 
+#ifndef CONFIG_CLIP_DTLS_UPLOAD
 static int send_payload(struct https_stream *stream, size_t offset, size_t length)
 {
     size_t total = 0;
@@ -459,6 +483,8 @@ static int tls_connect(struct https_stream **stream)
     return ret;
 }
 
+#endif
+
 static void digest_text(const uint8_t digest[32], char text[65])
 {
     for (int i = 0; i < 32; i++) { snprintf(text + 2 * i, 3, "%02x", digest[i]); }
@@ -483,6 +509,10 @@ static int destination_digest(uint8_t digest[32])
     for (size_t i = 0; !ret && i < ARRAY_SIZE(fields); i++) {
         ret = mbedtls_sha256_update(&hash, (const uint8_t *)fields[i], strlen(fields[i]) + 1);
     }
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+    static const uint8_t protocol_identity[] = "dtls-upload-v3";
+    if (!ret) { ret = mbedtls_sha256_update(&hash, protocol_identity, sizeof(protocol_identity)); }
+#endif
     if (!ret) { ret = mbedtls_sha256_update(&hash, https_ca, sizeof(https_ca)); }
     if (!ret) { ret = mbedtls_sha256_finish(&hash, digest); }
     mbedtls_sha256_free(&hash);
@@ -774,11 +804,56 @@ static void schedule_after_job(int ret)
         k_mutex_unlock(&control_lock);
 }
 
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+static int datagram_read(uint32_t offset, uint8_t *out, size_t length)
+{
+    int ret = check_cancel(); if (ret) { return ret; }
+    if (offset > file_length || length > file_length - offset) { return -EINVAL; }
+    if (!cache_length || offset < cache_offset || offset + length > cache_offset + cache_length) {
+        ret = fs_seek(&file, offset, FS_SEEK_SET); if (ret) { return ret; }
+        cache_offset = offset; cache_length = 0;
+        uint32_t wanted = MIN(sizeof(io), file_length - offset);
+        while (cache_length < wanted) {
+            ret = check_cancel(); if (ret) { return ret; }
+            ssize_t n = fs_read(&file, io + cache_length, wanted - cache_length);
+            if (n <= 0) { return n < 0 ? (int)n : -EIO; }
+            cache_length += n;
+        }
+    }
+    memcpy(out, io + offset - cache_offset, length);
+    return 0;
+}
+static void datagram_progress(uint32_t sent, uint32_t received, uint32_t durable, uint32_t resumed)
+{
+    atomic_set(&stage, SENDING);
+    atomic_set(&bytes_sent, sent); atomic_set(&datagram_received, received);
+    atomic_set(&confirmed, durable); atomic_set(&resume_from, resumed);
+    progress();
+}
+static int send_datagram_file(const struct upload_file_record *stamp)
+{
+    struct dtls_upload_identity identity = {.device = device_id, .session = session,
+        .credential = token, .segment = segment, .size = file_length};
+    memcpy(identity.sha256, stamp->content_sha256, sizeof(identity.sha256));
+    cache_length = 0;
+    struct dtls_upload_stats statistics;
+    int ret = dtls_upload_file(datagram, &identity, datagram_read, datagram_progress, &statistics);
+    k_mutex_lock(&control_lock, K_FOREVER); last_datagram = statistics;
+    k_mutex_unlock(&control_lock);
+    return ret;
+}
+#endif
+
 /* Upload one file; the batch owns Wi-Fi/TLS and recording/storage exclusion. */
 static int upload_file(struct https_stream **stream)
 {
     upload_perf_begin(UP_PREPARE, session, segment, 0, 0);
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+    atomic_set(&tls_step, datagram ? TLS_SETUP_HTTP : TLS_SETUP_IDLE);
+    atomic_clear(&datagram_received);
+#else
     atomic_set(&tls_step, *stream ? TLS_SETUP_HTTP : TLS_SETUP_IDLE);
+#endif
     atomic_set(&stage, PREPARING);
     atomic_clear(&bytes_sent); atomic_clear(&confirmed); atomic_clear(&resume_from);
     atomic_clear(&total_bytes); atomic_clear(&state_error);
@@ -797,7 +872,21 @@ static int upload_file(struct https_stream **stream)
     if (!ret) {
         file_length = entry.size;
         atomic_set(&total_bytes, file_length);
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        struct upload_file_record cached;
+        uint8_t destination[32];
+        ret = destination_digest(destination);
+        int loaded = ret ? ret : upload_state_load(session, segment, &cached);
+        if (!ret && !loaded && cached.size == file_length &&
+            !memcmp(cached.destination_sha256, destination, sizeof(destination))) {
+            /* Sealed segments are immutable. Reuse their CRC-protected hash;
+             * final server SHA256 still detects SD corruption before COMPLETE. */
+            digest_text(cached.content_sha256, expected_hash);
+        } else if (!ret && (loaded == -ENOENT || loaded == -EBADMSG || !loaded)) { ret = hash_file(); }
+        else if (!ret) { ret = loaded; }
+#else
         ret = hash_file();
+#endif
     }
     if (!ret) {
         stamp.size = file_length;
@@ -815,7 +904,11 @@ static int upload_file(struct https_stream **stream)
     upload_perf_end(ret);
     if (!ret && !wifi_is_sta_connected()) {
         upload_perf_begin(UP_WIFI, session, segment, 0, 0);
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        dtls_upload_close(datagram); datagram = NULL;
+#else
         https_stream_close(*stream); *stream = NULL;
+#endif
         atomic_set(&stage, CONNECTING);
         ret = wifi_station_connect(ssid, password, &cancelled);
         upload_perf_end(ret);
@@ -825,6 +918,23 @@ static int upload_file(struct https_stream **stream)
         ret = sync_upload_time();
         upload_perf_end(ret);
     }
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+    ARG_UNUSED(stream);
+    bool reused = datagram != NULL;
+    if (!ret && !datagram) {
+        atomic_set(&stage, TLS); atomic_set(&tls_step, TLS_SETUP_HANDSHAKE);
+        ret = dtls_upload_open(&datagram, host, port, https_ca, sizeof(https_ca), check_cancel);
+    }
+    if (!ret) {
+        atomic_set(&tls_step, TLS_SETUP_HTTP);
+        ret = send_datagram_file(&stamp);
+        if (reused && (ret == -EIO || ret == -ECONNRESET || ret == -EPIPE || ret == -ENOTCONN) && !check_cancel()) {
+            dtls_upload_close(datagram); datagram = NULL;
+            ret = dtls_upload_open(&datagram, host, port, https_ca, sizeof(https_ca), check_cancel);
+            if (!ret) { ret = send_datagram_file(&stamp); }
+        }
+    }
+#else
     bool reused = *stream != NULL;
     if (!ret && !*stream) {
         upload_perf_begin(UP_TLS, session, segment, 0, 0);
@@ -848,6 +958,7 @@ static int upload_file(struct https_stream **stream)
             if (!ret) { atomic_set(&tls_step, TLS_SETUP_HTTP); ret = upload(*stream); }
         }
     }
+#endif
     upload_perf_begin(UP_CLEANUP, session, segment, atomic_get(&confirmed), file_length);
     struct k_work_sync sync;
     k_work_cancel_delayable_sync(&stall_work, &sync);
@@ -877,9 +988,11 @@ static int upload_file(struct https_stream **stream)
         if (saved && !atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, saved); }
         if (!ret && saved) { ret = saved; }
     }
+#ifndef CONFIG_CLIP_DTLS_UPLOAD
     if (!ret && !response_keep_alive) {
         https_stream_close(*stream); *stream = NULL;
     }
+#endif
     upload_perf_end(ret);
     return ret;
 }
@@ -890,6 +1003,9 @@ static void worker(void *a, void *b, void *c)
     for (;;) {
         if (k_sem_take(&start_job, K_SECONDS(1)) && !begin_auto()) { continue; }
         struct https_stream *stream = NULL;
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        clip_cpu_boost_acquire();
+#endif
         buffers = k_malloc(sizeof(*buffers));
         int ret = buffers ? 0 : -ENOMEM;
         if (!ret) {
@@ -911,10 +1027,17 @@ static void worker(void *a, void *b, void *c)
         }
         struct k_work_sync sync;
         k_work_cancel_delayable_sync(&stall_work, &sync);
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        dtls_upload_close(datagram); datagram = NULL;
+#else
         https_stream_close(stream);
+#endif
         int radio = wifi_off();
         if (!atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, radio); }
         k_free(buffers); buffers = NULL;
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        clip_cpu_boost_release();
+#endif
         if (!ret) { ret = atomic_get(&cleanup_error); }
         if (atomic_get(&cancelled)) { ret = -ECANCELED; }
         else if (atomic_get(&stalled)) { ret = -ETIMEDOUT; }
@@ -928,7 +1051,11 @@ static void worker(void *a, void *b, void *c)
     }
 }
 /* Full ECDSA handshakes measured 5816 B; 6 KiB left only 328 B. */
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+K_THREAD_DEFINE(https_worker, 12288, worker, NULL, NULL, NULL, 7, 0, 0);
+#else
 K_THREAD_DEFINE(https_worker, 8192, worker, NULL, NULL, NULL, 7, 0, 0);
+#endif
 
 static int configure_network(char *args)
 {
@@ -1016,6 +1143,17 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
         goto reply;
     }
 #endif
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+    if (!strcmp(ctx->name, "UPLOADNET")) {
+        return snprintf(response, length,
+            "{\"ok\":true,\"data\":{\"protocol\":3,\"elapsed_ms\":%u,\"packets\":%u,"
+            "\"retransmissions\":%u,\"receipts\":%u,\"received\":%u,\"durable\":%u,"
+            "\"resumed\":%u,\"rtt_ms\":%u,\"rto_ms\":%u,\"window_packets\":%u}}\n",
+            last_datagram.elapsed_ms, last_datagram.sent_packets, last_datagram.retransmissions,
+            last_datagram.receipts, last_datagram.received, last_datagram.durable,
+            last_datagram.resume_from, last_datagram.rtt_ms, last_datagram.rto_ms, last_datagram.window_packets);
+    }
+#endif
     if (!strcmp(ctx->name, "UPLOAD") && ctx->type != AT_CMD_TYPE_SET) { goto reply; }
     if (!strcmp(ctx->name, "UPLOADAUTO") && ctx->type != AT_CMD_TYPE_SET) {
         return snprintf(response, length,
@@ -1098,11 +1236,20 @@ reply:
     struct wifi_station_network network;
     wifi_station_get_network(&network);
     return snprintf(response, length,
-        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"confirmed\":%d,\"resume_from\":%d,\"size\":%d,\"state_error\":%d,\"protocol\":2,\"wifi_step\":\"%s\",\"tls_step\":\"%s\",\"wifi_ip\":\"%s\",\"wifi_netmask\":\"%s\",\"wifi_gateway\":\"%s\"}\n",
+        "{\"ok\":%s,\"error\":%d,\"stage\":\"%s\",\"active\":%s,\"last_error\":%d,\"sent\":%d,\"confirmed\":%d,\"resume_from\":%d,\"size\":%d,\"state_error\":%d,"
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        "\"protocol\":3,\"received\":%d,"
+#else
+        "\"protocol\":2,"
+#endif
+        "\"wifi_step\":\"%s\",\"tls_step\":\"%s\",\"wifi_ip\":\"%s\",\"wifi_netmask\":\"%s\",\"wifi_gateway\":\"%s\"}\n",
         ret ? "false" : "true", ret, names[atomic_get(&stage)],
         https_poc_active() ? "true" : "false", (int)atomic_get(&last_error), (int)atomic_get(&bytes_sent),
         (int)atomic_get(&confirmed), (int)atomic_get(&resume_from), (int)atomic_get(&total_bytes),
         (int)atomic_get(&state_error),
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        (int)atomic_get(&datagram_received),
+#endif
         wifi_station_last_step(), tls_steps[atomic_get(&tls_step)],
         network.ip, network.netmask, network.gateway);
 }
@@ -1128,6 +1275,9 @@ int https_poc_register(void)
         {"UPLOADAUTO", AT_CMD_SET | AT_CMD_QUERY, command},
         {"UPLOADSAVE", AT_CMD_EXEC, command}, {"UPLOADCLEAR", AT_CMD_EXEC, command},
         {"UPLOADCLOCK", AT_CMD_SET, command},
+#ifdef CONFIG_CLIP_DTLS_UPLOAD
+        {"UPLOADNET", AT_CMD_QUERY, command},
+#endif
 #ifdef CONFIG_CLIP_TCP_TRACE
         {"TCPTRACE", AT_CMD_SET, command},
 #endif

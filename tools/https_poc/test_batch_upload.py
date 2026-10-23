@@ -7,7 +7,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class BatchWorkerTest(unittest.TestCase):
-    def test_batch_reuse_legacy_close_reconnect_cancel_and_cleanup_failures(self):
+    def worker_fixture(self):
         source = (ROOT/'applications/clip/src/https_poc.c').read_text()
         worker = source[source.index('static int upload_file('):source.index('/* Full ECDSA handshakes')]
         code = r'''
@@ -132,6 +132,37 @@ int main(int argc,char **argv){
  assert(connections==disconnects);return 0;
 }
 '''
+        return code
+
+    def test_batch_reuse_legacy_close_reconnect_cancel_and_cleanup_failures(self):
+        code = self.worker_fixture()
         for mode in range(13):
+            with self.subTest(mode=mode):
+                compile_run(code, [str(mode)])
+
+    def test_dtls_reuses_connection_and_releases_cpu_and_handles_before_recording(self):
+        code = self.worker_fixture()
+        point = code.index('static int upload_file(')
+        adapter = r"""
+#define dtls_upload https_stream
+static struct https_stream *datagram;
+static int datagram_received;
+static const char host[]="receiver",port[]="9527";
+static const unsigned char https_ca[]="CA";
+int upload_state_load(const char*id,uint32_t n,struct upload_file_record*r){(void)id;(void)n;(void)r;return -ENOENT;}
+static void digest_text(const uint8_t*d,char*out){for(int i=0;i<32;i++)snprintf(out+2*i,3,"%02x",d[i]);}
+static int dtls_upload_open(struct https_stream**s,const char*h,const char*p,const unsigned char*ca,size_t n,int(*check)(void)){
+ (void)h;(void)p;(void)ca;(void)n;assert(!check());return tls_connect(s);
+}
+static void dtls_upload_close(struct https_stream*s){https_stream_close(s);}
+static int send_datagram_file(const struct upload_file_record*stamp){assert(stamp->size==file_length);return upload(datagram);}
+static void clip_cpu_boost_acquire(void){assert(!boosts);boosts++;}
+static void clip_cpu_boost_release(void){assert(boosts==1);boosts--;}
+"""
+        code = '#define CONFIG_CLIP_DTLS_UPLOAD 1\n#define TLS_SETUP_HANDSHAKE 2\nstatic int boosts;\n' + code[:point] + adapter + code[point:]
+        code = code.replace('active=0;ended=1;return 0;', 'assert(!boosts);active=0;ended=1;return 0;')
+        # Legacy HTTP Connection:close has no DTLS equivalent. All other
+        # failure, cancellation, rolling-window and cleanup scenarios apply.
+        for mode in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
             with self.subTest(mode=mode):
                 compile_run(code, [str(mode)])
