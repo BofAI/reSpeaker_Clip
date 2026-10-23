@@ -197,6 +197,17 @@ int usb_cdc_init(void)
 	}
 
 #endif
+	/* The controller can publish VBUS as part of usbd_init(), including
+	 * when booting with the cable already attached. Install the callback
+	 * first, with its work item ready, or that initial event can be lost
+	 * and the no-VBUS timer will later disable a connected USB device. */
+	k_work_init_delayable(&usb_timeout_work, usb_timeout_handler);
+	err = usbd_msg_register_cb(&clip_usbd, usb_msg_cb);
+	if (err) {
+		LOG_ERR("usbd message callback: %d", err);
+		return err;
+	}
+
 	/* Initialize USB device */
 	err = usbd_init(&clip_usbd);
 	if (err) {
@@ -204,14 +215,8 @@ int usb_cdc_init(void)
 		return err;
 	}
 
-	/* Register message callback */
-	usbd_msg_register_cb(&clip_usbd, usb_msg_cb);
-
 	/* Setup UART interrupt callback */
 	uart_irq_callback_set(cdc_dev, cdc_irq_handler);
-
-	/* Setup auto-disable work */
-	k_work_init_delayable(&usb_timeout_work, usb_timeout_handler);
 
 	/* USB starts disabled; use AT+USB=on to enable */
 	LOG_INF("USB CDC+MSC initialized (disabled)");
