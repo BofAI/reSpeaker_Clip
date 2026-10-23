@@ -71,3 +71,55 @@ still segment the stream. It requires an isolated diagnostic receiver advertisin
 the same 8 MiB bound. Compare against 64 KiB requests on that same receiver and
 image. It does not retain intermediate server checkpoints within the one PUT;
 this is an efficiency experiment, not the selected product resume policy.
+
+## Archived DTLS and UDP comparisons
+
+The `experiment/upload-bench-0.1.2` branch preserves these diagnostic paths.
+`experiment/https-runtime-0.1.2` remains the full-feature development baseline.
+Local firmware packages and raw test evidence are stored outside Git in the
+workspace `firmware/` library. Each historical image has its own source snapshot,
+final configuration, build records, manifest and test records. A current Git
+commit must not be substituted for an older image's dirty-source snapshot.
+
+Add `dtls.conf` after `cache.conf` for the DTLS experiments. Image24 measures
+real-file DTLS upload at 64/128 MHz. Image29 also adds `down-peak.conf` for the
+same-image UDP/DTLS receive comparison: RX64 KiB, TX16 KiB, heap96 KiB. Those
+receive settings are not the upload profile. Preserve the remaining fragments
+and SDK revisions from the selected image's build records.
+
+With a matching receiver and saved device configuration, select an idle mode:
+
+```text
+AT+UPLOADAUTO=off
+AT+UPLOADCPU=128
+AT+UPLOADDTLS=burst
+AT+UPLOAD=<session>:<segment>
+AT+UPLOAD?
+AT+UPLOADDTLS?
+```
+
+`burst` uploads the selected real file. `down` receives that same file to a new
+`/SD:/BENCH/` file, syncs it and verifies its full SHA256. `downram` receives a
+synthetic 4 MiB pattern over DTLS; `udp` receives the same pattern over plain UDP.
+The RAM modes still require a valid existing recording selector to enter the
+shared job dispatcher, but do not transmit that recording. They validate each
+new payload byte and unique-packet coverage without saving a received SD file.
+Only the HTTPS path implements the product durable resume protocol; the DTLS
+and UDP paths here are performance experiments, not persistent upload queues.
+
+`tools/https_poc/dtls_peak_server.py` serves the RAM comparison. It uses
+`udp_peak_channel.py` when explicitly started with `--allow-plain-udp` and reads
+the offered rate from its profile JSON. Plain UDP uses a diagnostic marker,
+session tag and cookie echo; it never sends the saved production token. DTLS
+requires the matching CA, server certificate and device token. Credentials and
+private keys remain in separately controlled configuration, outside this repo.
+Retain valid device time for DTLS certificate checks; do not disable validation
+to replay an old experiment.
+
+Before interpreting a result, check actual CPU frequency, `last_transport`,
+`last_direction`, confirmed size, receiver completion and integrity checks.
+Keep all attempts, including failures, and distinguish payload transfer time
+from preparation, Wi-Fi association and handshake. After completion/cancellation,
+wait for `UPLOAD?` to report inactive, then restore `UPLOADDTLS=off` and the
+original CPU frequency. Historical one-shot collection scripts may assert fresh
+directories or a specific previous image digest; inspect them before rerunning.
