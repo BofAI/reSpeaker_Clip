@@ -20,6 +20,13 @@ class BatchWorkerTest(unittest.TestCase):
 #include <errno.h>
 #include <setjmp.h>
 #include "upload_state.h"
+#include "upload_tune.h"
+#define K_FOREVER -1
+static int control_lock,job_server_chunk,job_socket_verified;
+static uint32_t tune_generation=1,job_generation;
+static struct upload_tuning tuning={16384,2048,8192,1},job_tuning;
+static void k_mutex_lock(int *m,int t){assert(!*m&&t==K_FOREVER);*m=1;}
+static void k_mutex_unlock(int *m){assert(*m);*m=0;}
 #define ARG_UNUSED(x) (void)(x)
 #define K_SECONDS(x) (x)
 #define K_MSEC(x) (x)
@@ -64,7 +71,7 @@ static int refill_auto_batch(void){
  if(mode==SCAN_CANCEL){cancelled=1;return -ECANCELED;}
  return 0;
 }
-static void *k_malloc(size_t n){return mode==ALLOC_ERROR?NULL:malloc(n);}
+static void *k_malloc(size_t n){assert(n==sizeof(*buffers)+2048);return mode==ALLOC_ERROR?NULL:malloc(n);}
 static void k_free(void *p){free(p);}
 static void k_work_cancel_delayable_sync(int *w,struct k_work_sync *s){(void)w;(void)s;}
 static void k_sleep(int t){(void)t;assert(0);}
@@ -90,6 +97,8 @@ static int sync_upload_time(void){assert(radio);return check_cancel();}
 static int tls_connect(struct https_stream **s){assert(radio&&!transport.live);transport.live=1;connections++;*s=&transport;return 0;}
 static void https_stream_close(struct https_stream *s){if(s){assert(s->live);s->live=0;disconnects++;}}
 static int upload(struct https_stream *s){
+ assert(job_generation==1 && job_tuning.chunk_size==16384 && job_tuning.write_size==2048);
+ tuning.chunk_size=32768; /* The batch must keep its original snapshot. */
  assert(s&&s->live&&file.open&&active);uploads++;
  if(mode==DROPPED&&attempt==2&&uploads==2){confirmed=4096;return -ECONNRESET;}
  if(mode==PROTOCOL&&attempt==2)return -EBADMSG;

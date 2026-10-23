@@ -30,6 +30,7 @@ class RegistryTest(unittest.TestCase):
 #include <stddef.h>
 #include <errno.h>
 #define CONFIG_CLIP_HTTPS_POC 1
+#define CONFIG_CLIP_HTTPS_EXPERIMENT 1
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define LOG_DBG(...) ((void)0)
 struct at_command {const char *name; void (*handler)(void);};

@@ -21,6 +21,9 @@ struct https_stream {
     mbedtls_ssl_context ssl;
     mbedtls_ssl_config config;
     mbedtls_x509_crt ca;
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    int want;
+#endif
 };
 
 static int random_bytes(void *context, unsigned char *data, size_t length)
@@ -86,9 +89,14 @@ void https_stream_close(struct https_stream *s)
 
 int https_stream_open(struct https_stream **out, const struct sockaddr *address,
                       socklen_t address_length, const char *hostname,
-                      const unsigned char *ca, size_t ca_length, int (*check)(void))
+                      const unsigned char *ca, size_t ca_length, int (*check)(void),
+                      const struct upload_tuning *tuning)
 {
+    (void)tuning;
     *out = NULL;
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+    if (!upload_tune_valid(tuning)) { return -EINVAL; }
+#endif
     int ret = check();
     if (ret) { return ret; }
     struct https_stream *s = k_calloc(1, sizeof(*s));
@@ -116,6 +124,31 @@ int https_stream_open(struct https_stream **out, const struct sockaddr *address,
     if (mbedtls_ssl_set_hostname(&s->ssl, hostname)) { ret = -ENOMEM; goto fail; }
     s->socket = zsock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (s->socket < 0) { ret = -errno; goto fail; }
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+    int enabled = tuning->nodelay;
+    int send_window = tuning->send_window;
+    if (zsock_setsockopt(s->socket, IPPROTO_TCP, TCP_NODELAY, &enabled, sizeof(enabled)) < 0 ||
+        zsock_setsockopt(s->socket, SOL_SOCKET, SO_SNDBUF, &send_window, sizeof(send_window)) < 0) {
+        ret = -errno; goto fail;
+    }
+    int actual = -1;
+    socklen_t option_size = sizeof(actual);
+    if (zsock_getsockopt(s->socket, IPPROTO_TCP, TCP_NODELAY, &actual, &option_size) < 0) {
+        ret = -errno; goto fail;
+    }
+    if (actual != enabled) { ret = -EIO; goto fail; }
+    actual = -1; option_size = sizeof(actual);
+    if (zsock_getsockopt(s->socket, SOL_SOCKET, SO_SNDBUF, &actual, &option_size) < 0) {
+        ret = -errno; goto fail;
+    }
+    if (actual != send_window) { ret = -EIO; goto fail; }
+#elif defined(CONFIG_CLIP_HTTPS_TCP_NODELAY)
+    int enabled = 1;
+    if (zsock_setsockopt(s->socket, IPPROTO_TCP, TCP_NODELAY,
+                         &enabled, sizeof(enabled)) < 0) {
+        ret = -errno; goto fail;
+    }
+#endif
     int flags = zsock_fcntl(s->socket, ZVFS_F_GETFL, 0);
     if (flags < 0 || zsock_fcntl(s->socket, ZVFS_F_SETFL, flags | ZVFS_O_NONBLOCK) < 0) {
         ret = -errno; goto fail;
@@ -201,3 +234,44 @@ ssize_t https_stream_read(struct https_stream *s, void *data, size_t length)
         if (ret) { return ret; }
     }
 }
+
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+static ssize_t try_result(struct https_stream *s, int ret)
+{
+    s->want = ret;
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        return -EAGAIN;
+    }
+    if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY) { return 0; }
+    return ret < 0 ? -EIO : ret;
+}
+
+ssize_t https_stream_try_write(struct https_stream *s, const void *data, size_t length)
+{
+    int ret = s->check();
+    return ret ? ret : try_result(s, mbedtls_ssl_write(&s->ssl, data, length));
+}
+
+ssize_t https_stream_try_read(struct https_stream *s, void *data, size_t length)
+{
+    int ret = s->check();
+    return ret ? ret : try_result(s, mbedtls_ssl_read(&s->ssl, data, length));
+}
+
+int https_stream_wait_pair(struct https_stream *first, struct https_stream *second)
+{
+    struct https_stream *streams[] = {first, second};
+    struct zsock_pollfd fds[2];
+    int count = 0;
+    for (unsigned int i = 0; i < ARRAY_SIZE(streams); i++) {
+        struct https_stream *s = streams[i];
+        if (!s) { continue; }
+        int ret = s->check();
+        if (ret) { return ret; }
+        fds[count++] = (struct zsock_pollfd){.fd = s->socket,
+            .events = s->want == MBEDTLS_ERR_SSL_WANT_READ ? ZSOCK_POLLIN : ZSOCK_POLLOUT};
+    }
+    int ret = zsock_poll(fds, count, WAIT_SLICE_MS);
+    return ret < 0 && errno != EINTR ? -errno : 0;
+}
+#endif

@@ -12,6 +12,10 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class StreamTest(unittest.TestCase):
+    nodelay = False
+    tuned = False
+    experiment = False
+
     @classmethod
     def setUpClass(cls):
         cls.directory = tempfile.TemporaryDirectory()
@@ -30,6 +34,7 @@ class StreamTest(unittest.TestCase):
 #include <fcntl.h>
 #include <poll.h>
 #define MIN(a,b) ((a)<(b)?(a):(b))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define ZVFS_F_GETFL F_GETFL
 #define ZVFS_F_SETFL F_SETFL
 #define ZVFS_O_NONBLOCK O_NONBLOCK
@@ -59,6 +64,23 @@ static int64_t now, cancel_at = -1;
 static int live, sockets, polls, tls_calls, cert_error, verify_error, so_error;
 static int connect_pending, handshake_pending, write_pending, read_pending;
 static int random_fail, ready, partial, authenticated;
+#if defined(CONFIG_CLIP_HTTPS_TCP_NODELAY) || defined(CONFIG_CLIP_HTTPS_TUNING)
+static int option_error;
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+static int option_get_error, option_mismatch, actual_nodelay, actual_send;
+#endif
+static int zsock_setsockopt(int fd,int level,int opt,const void *value,socklen_t len) {
+ assert(fd==7 && len==sizeof(int) && sockets==1 && tls_calls==0);
+ if(option_error){errno=ENOPROTOOPT;return -1;}
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+ if(level==IPPROTO_TCP && opt==TCP_NODELAY){actual_nodelay=*(const int*)value;assert(actual_nodelay==0||actual_nodelay==1);}
+ else {assert(level==SOL_SOCKET && opt==SO_SNDBUF);actual_send=*(const int*)value;assert(actual_send==5461||actual_send==8192);}
+#else
+ assert(level==IPPROTO_TCP && opt==TCP_NODELAY && *(const int*)value==1);
+#endif
+ return 0;
+}
+#endif
 static const unsigned char *retry_buffer;
 static size_t retry_length;
 static void *k_calloc(size_t n, size_t s) { void *p=calloc(n,s); if(p)live++; return p; }
@@ -100,6 +122,12 @@ static int zsock_poll(struct pollfd *p,int n,int timeout) {
  if(ready){p->revents=p->events;return 1;}return 0;
 }
 static int zsock_getsockopt(int fd,int level,int opt,void *out,socklen_t *len) {
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+ if((level==IPPROTO_TCP && opt==TCP_NODELAY)||(level==SOL_SOCKET && opt==SO_SNDBUF)) {
+  assert(fd==7 && *len==sizeof(int));if(option_get_error){errno=ENOPROTOOPT;return -1;}
+  *(int*)out=(opt==TCP_NODELAY && level==IPPROTO_TCP?actual_nodelay:actual_send)+option_mismatch;return 0;
+ }
+#endif
  assert(fd==7 && level==SOL_SOCKET && opt==SO_ERROR && *len==sizeof(int));*(int*)out=so_error;return 0;
 }
 static ssize_t zsock_send(int fd,const void *p,size_t n,int flags) { assert(fd==7 && p && flags==MSG_DONTWAIT);return n; }
@@ -119,12 +147,20 @@ static int mbedtls_ssl_write(int *s,const unsigned char *p,size_t n) {
 static int mbedtls_ssl_read(int *s,void *p,size_t n) { assert(*s==1 && p && n);tls_calls++;return read_pending ? MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY; }
 '''
         fixture = "#include <netinet/in.h>\n" + fixture
+        fixture = "#include <netinet/tcp.h>\n" + fixture
+        if cls.nodelay:
+            fixture = "#define CONFIG_CLIP_HTTPS_TCP_NODELAY 1\n" + fixture
+        if cls.tuned:
+            fixture = "#define CONFIG_CLIP_HTTPS_TUNING 1\n" + fixture
+        if cls.experiment:
+            fixture = "#define CONFIG_CLIP_HTTPS_EXPERIMENT 1\n" + fixture
         fixture += source
         fixture += r'''
 int main(int argc,char **argv) {
  assert(argc==2);
  const char *name=argv[1];struct https_stream *s=NULL;struct sockaddr a={0};
  int expected=0;
+ struct upload_tuning tuning={16384,2048,8192,1};
  if(!strcmp(name,"connect-cancel")){connect_pending=1;cancel_at=120;expected=-ECANCELED;}
  if(!strcmp(name,"handshake-cancel")){handshake_pending=1;cancel_at=120;expected=-ECANCELED;}
  if(!strcmp(name,"connect-timeout")){connect_pending=1;expected=-ETIMEDOUT;}
@@ -132,10 +168,33 @@ int main(int argc,char **argv) {
  if(!strcmp(name,"connect-error")){connect_pending=ready=1;so_error=ECONNREFUSED;expected=-ECONNREFUSED;}
  if(!strcmp(name,"bad-ca")){cert_error=1;expected=-EACCES;}
  if(!strcmp(name,"bad-peer")){verify_error=1;expected=-EACCES;}
- int result=https_stream_open(&s,&a,sizeof(a),"receiver",(const unsigned char*)"CA",3,check);
+#if defined(CONFIG_CLIP_HTTPS_TCP_NODELAY) || defined(CONFIG_CLIP_HTTPS_TUNING)
+ if(!strcmp(name,"option-error")){option_error=1;expected=-ENOPROTOOPT;}
+#endif
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+ if(!strcmp(name,"option-get-error")){option_get_error=1;expected=-ENOPROTOOPT;}
+ if(!strcmp(name,"option-mismatch")){option_mismatch=1;expected=-EIO;}
+ if(!strcmp(name,"invalid-tune")){tuning.write_size=1024;expected=-EINVAL;}
+ if(!strcmp(name,"alternate-options")){tuning.nodelay=0;tuning.send_window=5461;}
+#endif
+ int result=https_stream_open(&s,&a,sizeof(a),"receiver",(const unsigned char*)"CA",3,check,&tuning);
  assert(result==expected);
  if(expected){assert(!s && !live && !sockets);if(expected==-ECANCELED)assert(now<=170);return 0;}
  assert(s && sockets==1 && live==1);
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+ if(!strcmp(name,"try-io")) {
+  char data[8]={0};int before=polls;int64_t start=now;
+  write_pending=1;assert(https_stream_try_write(s,data,sizeof(data))==-EAGAIN);
+  write_pending=0;assert(https_stream_try_write(s,data,sizeof(data))==sizeof(data));
+  read_pending=1;assert(https_stream_try_read(s,data,sizeof(data))==-EAGAIN);
+  assert(polls==before && now==start);
+  assert(!https_stream_wait_pair(s,NULL) && polls==before+1);
+  read_pending=0;assert(https_stream_try_read(s,data,sizeof(data))==0);
+  cancel_at=now;assert(https_stream_try_write(s,data,sizeof(data))==-ECANCELED);
+  assert(https_stream_try_read(s,data,sizeof(data))==-ECANCELED);
+  https_stream_close(s);assert(!live && !sockets);return 0;
+ }
+#endif
  if(!strcmp(name,"write-cancel")){write_pending=1;cancel_at=now+120;expected=-ECANCELED;}
  if(!strcmp(name,"read-cancel")){read_pending=1;cancel_at=now+120;expected=-ECANCELED;}
  if(!strcmp(name,"read-timeout")){read_pending=1;expected=-ETIMEDOUT;}
@@ -153,11 +212,14 @@ int main(int argc,char **argv) {
 }
 '''
         header = '#include "' + str(ROOT / 'applications/clip/include/upload_perf.h') + '"\n'
+        header += '#include "' + str(ROOT / 'applications/clip/include/upload_tune.h') + '"\n'
         (root / "test.c").write_text(header + fixture)
         cls.executable = root / "test"
         try:
             subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
                             "-fsanitize=address,undefined", str(root / "test.c"),
+                            str(ROOT / 'applications/clip/src/upload_tune.c'),
+                            '-I', str(ROOT / 'applications/clip/include'),
                             "-o", str(cls.executable)], check=True)
         except BaseException:
             cls.directory.cleanup()
@@ -180,6 +242,29 @@ int main(int argc,char **argv) {
 
     def test_partial_write_retries_identical_remaining_tls_buffer(self):
         subprocess.run([str(self.executable), "partial-write"], check=True)
+
+
+class NodelayStreamTest(StreamTest):
+    nodelay = True
+
+    def test_socket_option_error_releases_stream(self):
+        subprocess.run([str(self.executable), "option-error"], check=True)
+
+
+class TunedStreamTest(NodelayStreamTest):
+    tuned = True
+
+    def test_options_must_apply_and_read_back(self):
+        for case in ('option-get-error', 'option-mismatch', 'invalid-tune', 'alternate-options'):
+            with self.subTest(case=case):
+                subprocess.run([str(self.executable), case], check=True)
+
+
+class ExperimentalStreamTest(TunedStreamTest):
+    experiment = True
+
+    def test_nonblocking_operations_never_hide_a_poll_loop(self):
+        subprocess.run([str(self.executable), 'try-io'], check=True)
 
 
 if __name__ == "__main__":

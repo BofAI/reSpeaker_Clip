@@ -10,6 +10,7 @@ import ssl
 import threading
 
 from server import Receiver
+from resume_store import CHUNK_LIMITS, MAX_CHUNK
 from profile_timing import FileSink
 
 
@@ -40,6 +41,8 @@ def main():
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--port', type=int, default=9527)
     parser.add_argument('--device', required=True)
+    parser.add_argument('--max-chunk', type=int, choices=CHUNK_LIMITS, default=MAX_CHUNK,
+                        help='maximum durable request bytes; default 16384')
     parser.add_argument('--profile-log', type=Path, help='exclusive bounded timing output; disabled by default')
     args = parser.parse_args()
     token = (args.root / 'private/token').read_text().strip()
@@ -47,7 +50,8 @@ def main():
         parser.error('invalid bearer token file')
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,32}', args.device):
         parser.error('invalid device identity')
-    server = BoundedReceiver(('0.0.0.0', args.port), args.root / 'data', args.device, token)
+    server = BoundedReceiver(('0.0.0.0', args.port), args.root / 'data', args.device, token,
+                             max_chunk=args.max_chunk)
     sink = FileSink(args.profile_log) if args.profile_log else None
     server.profile_sink = sink
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

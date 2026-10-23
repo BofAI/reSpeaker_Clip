@@ -20,14 +20,16 @@ RESUME_ROUTE = re.compile(r"/v2/devices/([A-Za-z0-9_-]{1,32})/recordings/([0-9]{
 class Receiver(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, directory, device, token):
+    def __init__(self, address, directory, device, token, *, max_chunk=MAX_CHUNK):
+        commit_lock = threading.Lock()
+        resume = ResumeStore(directory, commit_lock, max_chunk=max_chunk)
         super().__init__(address, Handler)
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self.device, self.token = device, token
         self.profile_sink = None
-        self.commit_lock = threading.Lock()
-        self.resume = ResumeStore(self.directory, self.commit_lock)
+        self.commit_lock = commit_lock
+        self.resume = resume
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -194,11 +196,12 @@ class Handler(BaseHTTPRequestHandler):
             if not write:
                 if self.headers.get_all("Content-Length", []) not in ([], ["0"]):
                     raise ResumeError(400, "invalid_headers")
-                return self.reply(200, self.server.resume.status(object_id, size, digest))
-            length = int(header("Content-Length", r"[1-9][0-9]{0,4}"))
+                receipt = self.server.resume.status(object_id, size, digest)
+                return self.reply(200, dict(receipt, max_chunk=self.server.resume.max_chunk))
+            length = int(header("Content-Length", r"[1-9][0-9]{0,5}"))
             offset = int(header("Upload-Offset", r"0|[1-9][0-9]{0,7}"))
             chunk_hash = header("X-Chunk-SHA256", r"[0-9a-f]{64}")
-            if length > MAX_CHUNK or offset + length > size:
+            if length > self.server.resume.max_chunk or offset + length > size:
                 raise ResumeError(400, "invalid_chunk")
             identify(offset=offset, length=length)
             with measure('body_receive_us'):
@@ -206,7 +209,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(data) != length:
                 raise ResumeError(400, "truncated_chunk")
             code, receipt = self.server.resume.commit(object_id, size, digest, offset, data, chunk_hash)
-            self.reply(code, receipt)
+            self.reply(code, dict(receipt, max_chunk=self.server.resume.max_chunk))
         except ResumeError as error:
             self.reply(error.code, error.payload)
         except (OSError, ValueError):

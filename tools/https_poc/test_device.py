@@ -77,11 +77,11 @@ class ConfigurationTest(unittest.TestCase):
 
 
 class ExchangeTest(unittest.TestCase):
-    def exchange_bytes(self, chunks):
+    def exchange_bytes(self, chunks, **options):
         with patch("device.os.write", side_effect=lambda fd, data: len(data)), \
                 patch("device.select.select", return_value=([7], [], [])), \
                 patch("device.os.read", side_effect=chunks):
-            return exchange(7, "AT+UPLOAD?")
+            return exchange(7, "AT+UPLOAD?", **options)
 
     def test_fragmented_reply(self):
         self.assertEqual(self.exchange_bytes([b'{"ok":tr', b'ue,"active":false}\n']),
@@ -99,6 +99,10 @@ class ExchangeTest(unittest.TestCase):
     def test_rejection(self):
         with self.assertRaises(RuntimeError):
             self.exchange_bytes([b'{"ok":false,"error":-16}\n'])
+
+    def test_explicit_rejection_observation_preserves_error(self):
+        self.assertEqual(self.exchange_bytes([b'{"ok":false,"error":-16}\n'], allow_rejected=True),
+                         {"ok": False, "error": -16})
 
     def test_disconnect(self):
         with self.assertRaisesRegex(RuntimeError, "disconnected"):

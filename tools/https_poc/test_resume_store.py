@@ -11,6 +11,64 @@ from resume_store import MAX_CHUNK, ResumeError, ResumeStore
 
 
 class ResumeStoreTest(unittest.TestCase):
+    def test_64k_and_128k_checkpoints_resume_with_default_receiver(self):
+        for limit in (65536, 131072):
+            with self.subTest(limit=limit):
+                self.data = bytes(range(256)) * (limit // 256 + 1)
+                self.digest = hashlib.sha256(self.data).hexdigest()
+                self.identity = hashlib.sha256(f'large-{limit}'.encode()).hexdigest()
+                self.store = ResumeStore(self.directory, threading.Lock(), max_chunk=limit)
+                block = self.data[:limit]
+                self.assertEqual(self.commit(0, block)[1]['offset'], limit)
+                self.assertEqual(self.commit(0, block)[0], 200)
+                self.store = ResumeStore(self.directory, threading.Lock())
+                self.assertEqual(self.status()['offset'], limit)
+                self.assertEqual(self.commit(limit)[1]['status'], 'stored')
+                self.assertEqual((self.directory / (self.identity + '.bin')).read_bytes(), self.data)
+
+    def test_larger_chunk_opt_in_and_resume_with_default_limit(self):
+        data = self.data[:32768]
+        with self.assertRaises(ResumeError) as error:
+            self.commit(0, data)
+        self.assertEqual(error.exception.payload['error'], 'invalid_chunk')
+        self.store = ResumeStore(self.directory, threading.Lock(), max_chunk=32768)
+        self.assertEqual(self.commit(0, data)[1]['offset'], 32768)
+        self.assertEqual(self.commit(0, data)[0], 200)  # Lost receipt, retry safely.
+        self.store = ResumeStore(self.directory, threading.Lock())
+        self.assertEqual(self.status()['offset'], 32768)
+        self.assertEqual(self.commit(32768)[1]['status'], 'stored')
+        self.assertEqual((self.directory / (self.identity + '.bin')).read_bytes(), self.data)
+
+    def test_larger_chunk_can_start_at_a_16k_checkpoint(self):
+        self.commit(0)
+        self.store = ResumeStore(self.directory, threading.Lock(), max_chunk=32768)
+        self.assertEqual(self.commit(16384, self.data[16384:])[1]['status'], 'stored')
+        self.assertEqual((self.directory / (self.identity + '.bin')).read_bytes(), self.data)
+
+    def test_larger_chunk_uncommitted_tail_is_discarded(self):
+        self.store = ResumeStore(self.directory, threading.Lock(), max_chunk=32768)
+        original = self.store._save
+
+        def fail_checkpoint(path, state):
+            if state['offset']:
+                raise OSError('simulated checkpoint failure')
+            original(path, state)
+
+        self.store._save = fail_checkpoint
+        with self.assertRaises(OSError):
+            self.commit(0, self.data[:32768])
+        self.store = ResumeStore(self.directory, threading.Lock())
+        self.assertEqual(self.status()['offset'], 0)
+        self.assertEqual((self.directory / (self.identity + '.partial')).stat().st_size, 0)
+
+    def test_larger_chunk_limit_remains_bounded(self):
+        for limit in (0, 98304, 262144, 32769):
+            with self.subTest(limit=limit), self.assertRaises(ValueError):
+                ResumeStore(self.directory, threading.Lock(), max_chunk=limit)
+        self.store = ResumeStore(self.directory, threading.Lock(), max_chunk=32768)
+        with self.assertRaises(ResumeError):
+            self.commit(0, self.data[:32769])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

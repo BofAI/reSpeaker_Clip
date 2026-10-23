@@ -13,12 +13,86 @@ menuconfig CLIP
 
 if CLIP
 
+config CLIP_UPLOAD_BENCH_DTLS
+	bool "Upload-only DTLS 1.2 throughput experiment"
+	depends on CLIP_UPLOAD_BENCH_CACHE
+	default n
+	help
+	  Manual, bounded file-transfer benchmark over standard DTLS/UDP.
+	  Uses the existing trusted CA; never updates production upload records.
+
+config CLIP_UPLOAD_BENCH_WHOLE
+	bool "Upload-only whole-file HTTP request experiment"
+	depends on CLIP_UPLOAD_BENCH
+	default n
+	help
+	  Allow a maximum 8 MiB streamed request, for measuring HTTP receipt costs.
+	  Does not allocate a file-sized buffer or change production limits.
+
+config CLIP_UPLOAD_BENCH_CACHE
+	bool "Upload-only bounded chunk cache experiment"
+	depends on CLIP_UPLOAD_BENCH
+	default n
+	help
+	  Reserve a 64 KiB chunk buffer for same-image SD reread comparisons.
+	  Runtime USB control defaults off. Not part of product firmware.
+
+config CLIP_UPLOAD_BENCH
+	bool "Upload-only resource and throughput verification image"
+	depends on CLIP_HTTPS_POC
+	default n
+	help
+	  Dedicated USB-controlled upload application, without recording, BLE,
+	  display or download services. Uses the same upload/TLS implementation.
+
 config CLIP_HTTPS_POC
 	bool "Experimental USB-controlled HTTPS upload"
 	default n
 	help
 	  Station-only, stopped-recording upload. Uses CDC-only USB and disables
 	  application OTA during this experiment. Requires a supplied test CA.
+
+config CLIP_HTTPS_TCP_NODELAY
+	bool "Disable Nagle on the experimental HTTPS upload socket"
+	depends on CLIP_HTTPS_POC
+	default n
+	help
+	  Single-variable transport experiment. Fail the connection if the TCP
+	  option cannot be applied. Does not change buffers or retransmit timers.
+
+config CLIP_HTTPS_WRITE_4096
+	bool "Combine two SD reads into a 4096-byte HTTPS write"
+	depends on CLIP_HTTPS_POC
+	default n
+	help
+	  Transport experiment only. Adds 2048 bytes to the job-owned heap
+	  workspace; retain 2048-byte SD reads and cancellation checks.
+
+config CLIP_HTTPS_TUNING
+	bool "RAM-only USB upload transport tuning"
+	depends on CLIP_HTTPS_POC
+	select NET_CONTEXT_SNDBUF
+	default n
+	help
+	  Diagnostic image only. Change bounded request/write sizes and socket
+	  options as one idle-only profile. Reset to build defaults on reboot.
+
+config CLIP_HTTPS_EXPERIMENT
+	bool "USB-only TLS capacity and pipeline experiments"
+	depends on CLIP_HTTPS_TUNING && CLIP_RESOURCE_STATS
+	default n
+	help
+	  Explicit manual tests only; no persistent settings or automatic jobs.
+
+config CLIP_HTTPS_CHUNK_SIZE
+	int "Experimental HTTPS request payload size"
+	depends on CLIP_HTTPS_POC
+	range 16384 131072
+	default 16384
+	help
+	  Bounds bytes per durable HTTP acknowledgement, not RAM buffering.
+	  The receiver must accept this size. TLS writes and SD reads keep
+	  their independent bounds; interruption can replay a larger tail.
 
 config CLIP_HTTPS_PROFILE
 	bool "Passive upload phase timing via USB"

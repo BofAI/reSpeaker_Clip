@@ -37,7 +37,9 @@ static struct {
 
 /* Command registry */
 static struct {
-#ifdef CONFIG_CLIP_HTTPS_POC
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    const struct at_command *cmds[56];
+#elif defined(CONFIG_CLIP_HTTPS_POC)
     /* HTTPS controls + diagnostics + stock commands exceed the original 40. */
     const struct at_command *cmds[48];
 #else
@@ -206,6 +208,23 @@ static int create_json_response(bool success, const char *message,
     return AT_ERR_NOMEM;
 }
 
+/* Product transports remain unchanged; upload-only builds link USB alone. */
+static void send_response(struct at_queue_item *item)
+{
+    at_ctx.response_buffer[sizeof(at_ctx.response_buffer)-1]=0;
+    size_t len=strnlen(at_ctx.response_buffer,sizeof(at_ctx.response_buffer));
+    if (item->transport_type==TRANSPORT_TYPE_USB) {
+        usb_cdc_send_response((uint8_t *)at_ctx.response_buffer,len);
+    }
+#ifndef CONFIG_CLIP_UPLOAD_BENCH
+    else if (item->transport_type==TRANSPORT_TYPE_UDP) {
+        transport_udp_send_response((uint8_t *)at_ctx.response_buffer,len);
+    } else {
+        transport_send_to(item->transport_type,(uint8_t *)at_ctx.response_buffer,len);
+    }
+#endif
+}
+
 /* Process single AT command */
 static void process_command(struct at_queue_item *item)
 {
@@ -214,18 +233,7 @@ static void process_command(struct at_queue_item *item)
     uint8_t cmd_type = AT_CMD_TYPE_EXEC;
     int ret;
 
-    /* Helper to send response via appropriate transport */
-    #define SEND_RESPONSE() do { \
-        at_ctx.response_buffer[sizeof(at_ctx.response_buffer) - 1] = '\0'; \
-        size_t resp_len = strnlen(at_ctx.response_buffer, sizeof(at_ctx.response_buffer)); \
-        if (item->transport_type == TRANSPORT_TYPE_USB) { \
-            usb_cdc_send_response((uint8_t *)at_ctx.response_buffer, resp_len); \
-        } else if (item->transport_type == TRANSPORT_TYPE_UDP) { \
-            transport_udp_send_response((uint8_t *)at_ctx.response_buffer, resp_len); \
-        } else { \
-            transport_send_to(item->transport_type, (uint8_t *)at_ctx.response_buffer, resp_len); \
-        } \
-    } while(0)
+    #define SEND_RESPONSE() send_response(item)
 
     /* Clear response buffer */
     memset(at_ctx.response_buffer, 0, sizeof(at_ctx.response_buffer));
@@ -350,6 +358,9 @@ int at_server_init(void)
 /* Submit AT command to server queue */
 int at_server_submit_cmd(const uint8_t *data, uint16_t len, uint8_t transport_type)
 {
+#ifdef CONFIG_CLIP_UPLOAD_BENCH
+    if (transport_type != TRANSPORT_TYPE_USB) { return -ENOTSUP; }
+#endif
     if (!data || len == 0 || len >= CONFIG_CLIP_AT_MAX_CMD_LEN) {
         return -EINVAL;
     }

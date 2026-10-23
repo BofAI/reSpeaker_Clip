@@ -21,6 +21,16 @@ endif()
 target_include_directories(app PRIVATE include)
 
 # Source files
+if(CONFIG_CLIP_UPLOAD_BENCH)
+    target_sources_ifdef(CONFIG_CLIP_UPLOAD_BENCH_DTLS app PRIVATE ../upload_bench/src/dtls_bench.c)
+    target_sources(app PRIVATE
+        ../upload_bench/src/main.c
+        ../upload_bench/src/platform.c
+        ../upload_bench/src/storage.c
+        ../upload_bench/src/usb.c
+        src/at_server.c
+    )
+else()
 target_sources(app PRIVATE
     src/main.c
     src/clip_event.c
@@ -42,6 +52,7 @@ target_sources(app PRIVATE
     src/battery.c
     src/usb_cdc.c
 )
+endif()
 
 if(CONFIG_CLIP_HTTPS_POC)
     # NCS nrf-config.h does not expose Zephyr's HAVE_TIME_DATE Kconfig option.
@@ -84,8 +95,9 @@ if(CONFIG_CLIP_HTTPS_POC)
     file(WRITE "${PROJECT_BINARY_DIR}/https_ca.h"
         "static const unsigned char https_ca[] = {${_ca_bytes}0};\n")
     target_include_directories(app PRIVATE "${PROJECT_BINARY_DIR}")
-    target_sources(app PRIVATE src/wifi_station.c src/https_poc.c src/https_stream.c src/upload_state.c src/upload_config.c src/upload_scan.c)
+    target_sources(app PRIVATE src/wifi_station.c src/https_poc.c src/https_stream.c src/upload_tune.c src/upload_state.c src/upload_config.c src/upload_scan.c)
     target_sources_ifdef(CONFIG_CLIP_HTTPS_PROFILE app PRIVATE src/upload_perf.c)
+    target_sources_ifdef(CONFIG_CLIP_HTTPS_EXPERIMENT app PRIVATE src/upload_dual.c)
 else()
     target_sources(app PRIVATE src/wifi.c)
 endif()

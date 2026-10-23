@@ -11,6 +11,8 @@ def main():
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--ca", type=Path, required=True)
+    parser.add_argument("--upload-only", action="store_true",
+                        help="use upload_bench base configuration and minimal entry point")
     parser.add_argument("--extra-conf", type=Path, action="append", default=[],
                         help="additional app-only config, appended after https.conf")
     args = parser.parse_args()
@@ -31,6 +33,8 @@ def main():
                str(repo / "applications/clip"), "-d", str(build), "--",
                "-DSNIPPET=production", "-DSNIPPET_ROOT=" + str(repo / "applications/clip"),
                "-Dclip_EXTRA_CONF_FILE=" + ";".join(map(str, configs))]
+    if args.upload_only:
+        command += ["-Dclip_CONF_FILE=" + str(repo / "applications/upload_bench/prj.conf")]
     build.parent.mkdir(parents=True, exist_ok=True)
     log = build.parent / (build.name + ".log")
     with log.open("w") as output:

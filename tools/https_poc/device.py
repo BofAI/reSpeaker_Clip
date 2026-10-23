@@ -41,7 +41,7 @@ def configure_upload(query, config):
     query(f"AT+UPTIME={int(time.time())}")
 
 
-def exchange(fd, command):
+def exchange(fd, command, *, allow_rejected=False):
     payload = (command + "\r\n").encode()
     if len(payload) > 255:
         raise ValueError("command exceeds firmware limit")
@@ -68,7 +68,7 @@ def exchange(fd, command):
             if (not isinstance(result, dict) or "event" in result
                     or type(result.get("ok")) is not bool):
                 continue
-            if not result["ok"]:
+            if not result["ok"] and not allow_rejected:
                 raise RuntimeError(f"device rejected command: {result}")
             return result
     raise TimeoutError("AT response timeout")

@@ -33,6 +33,14 @@ class RuntimeIntegrationTest(unittest.TestCase):
 #include <errno.h>
 #define TRANSPORT_TYPE_USB 1
 #define AT_CMD_TYPE_SET 1
+#define CONFIG_CLIP_HTTPS_TUNING 1
+#define CLIP_STATE_IDLE 0
+#define AT_ERR_NOMEM 12
+#include "upload_tune.h"
+static struct upload_tuning tuning={16384,2048,8192,1}, job_tuning;
+static uint32_t tune_generation=1, job_generation;
+static int job_server_chunk, job_socket_verified, device_state, pending, saves;
+static int clip_event_get_state(void) { return device_state; }
 #define CLOCK_REALTIME 0
 #define CLIP_EVENT_UPLOAD_BEGIN 1
 #define CLIP_EVENT_OK 0
@@ -64,7 +72,7 @@ static void k_mutex_lock(int *m,int wait) { assert(!*m);*m=1;(void)wait; }
 static void k_mutex_unlock(int *m) { assert(*m);*m=0; }
 static void atomic_set(int *v,int n) { *v=n; }
 static void atomic_clear(int *v) { *v=0; }
-int upload_config_save(struct upload_config *c) { (void)c; return save_error; }
+int upload_config_save(struct upload_config *c) { (void)c; saves++;return save_error; }
 int upload_config_clear(void) { return save_error; }
 int upload_config_valid(const struct upload_config *c) { (void)c;return 1; }
 static int list_states(const char *a,char *o,size_t n) { (void)a;(void)o;(void)n;return -ENOENT; }
@@ -75,7 +83,7 @@ enum { PREPARING = 1 };
 static int event_error, event_result, interrupts, resets, starts, clock_error;
 static long long wall_time;
 static bool https_poc_active(void) { return active; }
-static bool https_poc_record_pending(void) { return false; }
+static bool https_poc_record_pending(void) { return pending; }
 static int atomic_get(int *v) { return *v; }
 static void request_cancel(void) { cancelled = 1; interrupts++; }
 static int state_query(const char *args, char *out, size_t length) {
@@ -111,6 +119,28 @@ static void request(const char *name, const char *args, int transport, int type,
     assert(!strstr(response, "test-password"));
 }
 int main(void) {
+    struct at_cmd_ctx tune_ctx={1,0,"UPLOADTUNE",NULL};char tune_json[1024];
+    assert(command(&tune_ctx,tune_json,sizeof(tune_json))>0);
+    assert(strstr(tune_json,"\"persistent\":false") && tune_generation==1);
+    request("UPLOADTUNE","32768,4096,8192,2",1,AT_CMD_TYPE_SET,-EINVAL);
+    request("UPLOADTUNE","32768,4096,8192,1",0,AT_CMD_TYPE_SET,-EACCES);
+    assert(tuning.chunk_size==16384 && tuning.write_size==2048 && tune_generation==1);
+    tune_ctx.type=AT_CMD_TYPE_SET;tune_ctx.args="32768,4096,5461,0";
+    assert(command(&tune_ctx,tune_json,sizeof(tune_json))>0);
+    assert(tuning.chunk_size==32768 && tuning.write_size==4096 && tuning.send_window==5461 && !tuning.nodelay);
+    assert(tune_generation==2 && !saves);
+    job_tuning=tuning;job_generation=tune_generation;
+    active=1;request("UPLOADTUNE","16384,2048,8192,1",1,AT_CMD_TYPE_SET,-EBUSY);active=0;
+    pending=1;request("UPLOADTUNE","16384,2048,8192,1",1,AT_CMD_TYPE_SET,-EBUSY);pending=0;
+    device_state=1;request("UPLOADTUNE","16384,2048,8192,1",1,AT_CMD_TYPE_SET,-EBUSY);device_state=0;
+    settings.enabled=1;request("UPLOADTUNE","16384,2048,8192,1",1,AT_CMD_TYPE_SET,-EBUSY);settings.enabled=0;
+    assert(tune_generation==2 && tuning.chunk_size==32768);
+    tune_ctx.type=0;tune_ctx.args=NULL;active=1;
+    assert(command(&tune_ctx,tune_json,sizeof(tune_json))>0);active=0;
+    tune_ctx.type=AT_CMD_TYPE_SET;tune_ctx.args="16384,2048,8192,1";
+    assert(command(&tune_ctx,tune_json,sizeof(tune_json))>0);
+    assert(tuning.chunk_size==16384 && job_tuning.chunk_size==32768 && job_generation==2 && !saves);
+    assert(tune_reply(tune_json,8)<0);
     request("NETCFG", "test,test-password", 0, AT_CMD_TYPE_SET, -EACCES);
     assert(!ssid[0]);
     request("NETCFG", "test,short", 1, AT_CMD_TYPE_SET, -EINVAL);
@@ -171,6 +201,7 @@ int main(void) {
             (root / "test.c").write_text(code)
             subprocess.run(["clang", "-std=c11", "-Wall", "-Wextra", "-Werror",
                             "-fsanitize=address,undefined", "-I"+str(ROOT / "applications/clip/include"), str(root / "test.c"),
+                            str(ROOT / 'applications/clip/src/upload_tune.c'),
                             "-o", str(root / "test")], check=True)
             subprocess.run([str(root / "test")], check=True)
 

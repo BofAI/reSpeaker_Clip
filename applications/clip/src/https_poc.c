@@ -29,12 +29,39 @@
 #include "storage.h"
 #include "wifi.h"
 #include "https_ca.h"
+#ifdef CONFIG_CLIP_UPLOAD_BENCH
+#include "upload_bench_cpu.h"
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+#include "dtls_bench.h"
+static unsigned int dtls_window, job_dtls_window;
+static unsigned int dtls_download, job_dtls_download;
+static struct dtls_bench_result last_dtls;
+#endif
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+#include "upload_dual.h"
+#endif
 
 BUILD_ASSERT(IS_ENABLED(CONFIG_PSA_WANT_ALG_ECDSA) &&
              IS_ENABLED(CONFIG_MBEDTLS_KEY_EXCHANGE_ECDHE_ECDSA_ENABLED),
              "The HTTPS experiment's EC test certificates require ECDHE-ECDSA support");
 #define MAX_FILE (8U * 1024U * 1024U)
-#define UPLOAD_CHUNK (16U * 1024U)
+#define UPLOAD_CHUNK CONFIG_CLIP_HTTPS_CHUNK_SIZE
+#define FILE_READ_SIZE 2048U
+#define TLS_WRITE_SIZE (IS_ENABLED(CONFIG_CLIP_HTTPS_WRITE_4096) ? 4096U : 2048U)
+static struct upload_tuning tuning = {
+    .chunk_size = UPLOAD_CHUNK, .write_size = TLS_WRITE_SIZE, .send_window = 8192,
+    .nodelay = IS_ENABLED(CONFIG_CLIP_HTTPS_TCP_NODELAY),
+};
+static struct upload_tuning job_tuning;
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+#define BENCH_CACHE_SIZE 65536U
+static uint8_t bench_chunk[BENCH_CACHE_SIZE] __aligned(8);
+static bool bench_cache_enabled, job_bench_cache;
+static size_t bench_cached_offset, bench_cached_length;
+#endif
+static uint32_t tune_generation = 1, job_generation;
+static atomic_t job_server_chunk, job_socket_verified;
 #define CONNECT_BUDGET_MS (CONFIG_NET_SOCKETS_CONNECT_TIMEOUT + \
                            CONFIG_NET_SOCKETS_TLS_CONNECT_TIMEOUT)
 BUILD_ASSERT(CONFIG_NET_SOCKETS_CONNECT_TIMEOUT > 0 &&
@@ -76,8 +103,9 @@ static struct fs_file_t file;
 /* Allocate only during a job, from the same heap as TLS. This saves static
  * reservation, not peak upload memory; allocation failure is a normal error. */
 static struct upload_buffers {
-    uint8_t file_io[2048], receive[2048];
+    uint8_t receive[2048];
     char body[1025];
+    uint8_t file_io[] __aligned(8);
 } *buffers;
 #define io (buffers->file_io)
 #define recv_buffer (buffers->receive)
@@ -87,6 +115,34 @@ static size_t response_length, file_length, header_bytes;
 static bool response_final;
 static bool response_keep_alive;
 static int response_status;
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+extern struct k_heap _system_heap;
+static bool tls_probe;
+static bool pipeline;
+static size_t pending_response;
+static char dual_session[15];
+static uint32_t dual_segment;
+static bool dual_parallel = true;
+static struct dual_result dual_result;
+static struct {
+    uint32_t used[4], free[4], peak[4];
+    int result;
+    unsigned int completed;
+} probe;
+
+static void probe_snapshot(unsigned int index, int result)
+{
+    struct sys_memory_stats stats = {0};
+    (void)sys_heap_runtime_stats_get(&_system_heap.heap, &stats);
+    k_mutex_lock(&control_lock, K_FOREVER);
+    probe.used[index] = stats.allocated_bytes;
+    probe.free[index] = stats.free_bytes;
+    probe.peak[index] = stats.max_allocated_bytes;
+    probe.result = result;
+    probe.completed = index + 1;
+    k_mutex_unlock(&control_lock);
+}
+#endif
 
 /* Wall time uses libc time()/CLOCK_REALTIME; TLS timers use monotonic uptime. */
 mbedtls_ms_time_t mbedtls_ms_time(void) { return k_uptime_get(); }
@@ -135,6 +191,23 @@ void https_poc_record_complete(enum clip_event_result result)
 
 bool https_poc_command_allowed(const char *name)
 {
+#ifdef CONFIG_CLIP_UPLOAD_BENCH
+    if (!strcmp(name, "UPLOADCPU")) { return true; }
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+    if (!strcmp(name, "UPLOADDTLS")) { return true; }
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+    if (!strcmp(name, "UPLOADCACHE")) { return true; }
+#endif
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+    if (!strcmp(name, "UPLOADTUNE")) { return true; }
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    if (!strcmp(name, "UPLOADPROBE")) { return true; }
+    if (!strcmp(name, "UPLOADPIPE")) { return true; }
+    if (!strcmp(name, "UPLOADDUAL")) { return true; }
+#endif
+#endif
     /* Read-only instrumentation must remain available during TLS/upload. */
     if (!strcmp(name, "RES")) { return true; }
 #ifdef CONFIG_CLIP_TCP_TRACE
@@ -241,7 +314,7 @@ static bool valid_session(const char *s)
     return true;
 }
 
-static int hash_file_range(size_t offset, size_t length, char output[65])
+static int hash_file_range(size_t offset, size_t length, char output[65], uint8_t *retained)
 {
     int ret = fs_seek(&file, offset, FS_SEEK_SET);
     if (ret) { return ret; }
@@ -254,13 +327,14 @@ static int hash_file_range(size_t offset, size_t length, char output[65])
         ret = check_cancel();
         if (ret) { break; }
         uint64_t measured = upload_perf_now();
-        ssize_t n = fs_read(&file, io, MIN(sizeof(io), length - total));
+        uint8_t *destination = retained ? retained + total : io;
+        ssize_t n = fs_read(&file, destination, MIN(FILE_READ_SIZE, length - total));
         upload_perf_add(UP_READ_US, upload_perf_now() - measured);
         upload_perf_add(UP_FS_READS, 1);
         if (n <= 0) { ret = n < 0 ? (int)n : -EIO; break; }
         total += n;
         measured = upload_perf_now();
-        ret = mbedtls_sha256_update(&hash, io, n);
+        ret = mbedtls_sha256_update(&hash, destination, n);
         upload_perf_add(UP_HASH_US, upload_perf_now() - measured);
     }
     if (!ret) { ret = mbedtls_sha256_finish(&hash, digest); }
@@ -270,23 +344,52 @@ static int hash_file_range(size_t offset, size_t length, char output[65])
     return fs_seek(&file, offset, FS_SEEK_SET);
 }
 
-static int hash_file(void) { return hash_file_range(0, file_length, expected_hash); }
+static int hash_file(void) { return hash_file_range(0, file_length, expected_hash, NULL); }
 
-static int send_payload(struct https_stream *stream, size_t offset, size_t length)
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+static int send_cached_payload(struct https_stream *stream, size_t offset, size_t length)
 {
-    size_t total = 0;
+    if (offset != bench_cached_offset || length != bench_cached_length ||
+        length > sizeof(bench_chunk)) { return -EINVAL; }
     atomic_set(&stage, SENDING);
+    size_t total = 0;
     while (total < length) {
         int ret = check_cancel();
         if (ret) { return ret; }
-        uint64_t measured = upload_perf_now();
-        ssize_t n = fs_read(&file, io, MIN(sizeof(io), length - total));
-        upload_perf_add(UP_READ_US, upload_perf_now() - measured);
-        upload_perf_add(UP_FS_READS, 1);
-        if (n <= 0) { return n < 0 ? (int)n : -EIO; }
-        ret = https_stream_write(stream, io, n);
+        size_t count = MIN(job_tuning.write_size, length - total);
+        ret = https_stream_write(stream, bench_chunk + total, count);
         if (ret) { return ret; }
-        total += n;
+        total += count;
+        progress();
+        atomic_set(&bytes_sent, offset + total);
+    }
+    return (int)total;
+}
+#endif
+
+static int send_payload(struct https_stream *stream, size_t offset, size_t length)
+{
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+    if (job_bench_cache) { return send_cached_payload(stream, offset, length); }
+#endif
+    size_t total = 0;
+    atomic_set(&stage, SENDING);
+    while (total < length) {
+        size_t pending = 0;
+        size_t target = MIN(job_tuning.write_size, length - total);
+        while (pending < target) {
+            int ret = check_cancel();
+            if (ret) { return ret; }
+            uint64_t measured = upload_perf_now();
+            ssize_t n = fs_read(&file, io + pending, MIN(FILE_READ_SIZE, target - pending));
+            upload_perf_add(UP_READ_US, upload_perf_now() - measured);
+            upload_perf_add(UP_FS_READS, 1);
+            if (n <= 0) { return n < 0 ? (int)n : -EIO; }
+            pending += n;
+        }
+        int ret = https_stream_write(stream, io, pending);
+        if (ret) { return ret; }
+        total += pending;
         progress();
         atomic_set(&bytes_sent, offset + total);
     }
@@ -317,6 +420,9 @@ static int message_complete(struct http_parser *parser)
     response_status = parser->status_code;
     response_keep_alive = http_should_keep_alive(parser);
     response_final = true;
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    if (pipeline) { http_parser_pause(parser, 1); }
+#endif
     return check_cancel();
 }
 
@@ -345,39 +451,68 @@ static int receive_receipt(struct https_stream *stream, int expected_offset)
     response_status = 0;
     memset(response_body, 0, sizeof(response_body));
     while (!response_final) {
-        ssize_t count = https_stream_read(stream, recv_buffer, sizeof(recv_buffer));
+        ssize_t count;
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+        if (pipeline && pending_response) { count = pending_response; pending_response = 0; }
+        else
+#endif
+        { count = https_stream_read(stream, recv_buffer, sizeof(recv_buffer)); }
         if (count < 0) { return count; }
         size_t used = http_parser_execute(&parser, &callbacks, (char *)recv_buffer, count);
         int ret = check_cancel();
         if (ret) { return ret; }
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+        if (pipeline && response_final && HTTP_PARSER_ERRNO(&parser) == HPE_PAUSED) {
+            pending_response = count - used;
+            memmove(recv_buffer, recv_buffer + used, pending_response);
+        } else
+#endif
         if (HTTP_PARSER_ERRNO(&parser) != HPE_OK || used != (size_t)count) { return -EBADMSG; }
         if (!count && !response_final) { return -ECONNRESET; }
     }
     atomic_set(&stage, VERIFYING);
     if (response_status != 200 && (expected_offset < 0 || response_status != 201)) { return -EBADMSG; }
-    struct receipt { char *status; int size; char *sha256; int offset; } receipt;
+    struct receipt { char *status; int size; char *sha256; int offset; int max_chunk; } receipt = {0};
     static const struct json_obj_descr fields[] = {
         JSON_OBJ_DESCR_PRIM(struct receipt, status, JSON_TOK_STRING),
         JSON_OBJ_DESCR_PRIM(struct receipt, size, JSON_TOK_NUMBER),
         JSON_OBJ_DESCR_PRIM(struct receipt, sha256, JSON_TOK_STRING),
         JSON_OBJ_DESCR_PRIM(struct receipt, offset, JSON_TOK_NUMBER),
+        JSON_OBJ_DESCR_PRIM(struct receipt, max_chunk, JSON_TOK_NUMBER),
     };
     int ret = json_obj_parse(response_body, response_length, fields, ARRAY_SIZE(fields), &receipt);
-    if (ret != 15) { return -EBADMSG; }
+    if (ret < 0 || (ret & 15) != 15) { return -EBADMSG; }
+    if (expected_offset < 0) {
+        int limit = upload_tune_server_limit(job_tuning.chunk_size, receipt.max_chunk, ret & 16);
+        if (limit < 0) { return limit; }
+        atomic_set(&job_server_chunk, limit);
+    }
     return accept_receipt(receipt.status, receipt.size, receipt.sha256, receipt.offset, expected_offset);
 }
 
-static int request_chunk_impl(struct https_stream *stream, bool query, size_t offset, size_t length)
+static int send_chunk(struct https_stream *stream, bool query, size_t offset, size_t length)
 {
     char chunk_header[90] = {0};
     if (!query) {
         char digest[65];
-        int ret = hash_file_range(offset, length, digest);
+        uint8_t *retained = NULL;
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+        bench_cached_length = 0;
+        if (job_bench_cache) {
+            if (length > sizeof(bench_chunk)) { return -EMSGSIZE; }
+            retained = bench_chunk;
+        }
+#endif
+        int ret = hash_file_range(offset, length, digest, retained);
         if (ret) { return ret; }
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+        bench_cached_offset = offset;
+        bench_cached_length = length;
+#endif
         snprintf(chunk_header, sizeof(chunk_header), "X-Chunk-SHA256: %s\r\n", digest);
     }
     uint64_t measured = upload_perf_now();
-    int n = snprintf((char *)io, sizeof(io),
+    int n = snprintf((char *)io, job_tuning.write_size,
         "%s /v2/devices/%s/recordings/%s/%u HTTP/1.1\r\n"
         "Host: %s:%s\r\nAuthorization: Bearer %s\r\n"
         "X-Recording-Size: %u\r\nX-Content-SHA256: %s\r\n"
@@ -387,11 +522,11 @@ static int request_chunk_impl(struct https_stream *stream, bool query, size_t of
         (unsigned int)file_length, expected_hash, (unsigned int)offset, chunk_header,
         atomic_get(&auto_job) ? "X-Clip-Batch: 1\r\n" : "",
         (unsigned int)length);
-    if (n < 0 || (size_t)n >= sizeof(io)) { return -EMSGSIZE; }
+    if (n < 0 || (size_t)n >= job_tuning.write_size) { return -EMSGSIZE; }
     progress();
     int ret = https_stream_write(stream, io, n);
     upload_perf_add(UP_HEADER_US, upload_perf_now() - measured);
-    memset(io, 0, sizeof(io));
+    memset(io, 0, job_tuning.write_size);
     if (ret) { return ret; }
     if (!query) {
         /* Hashing rewound the file; request formatting only reused the buffer. */
@@ -400,7 +535,14 @@ static int request_chunk_impl(struct https_stream *stream, bool query, size_t of
         upload_perf_add(UP_BODY_US, upload_perf_now() - measured);
         if (ret < 0) { return ret; }
     }
-    measured = upload_perf_now();
+    return 0;
+}
+
+static int request_chunk_impl(struct https_stream *stream, bool query, size_t offset, size_t length)
+{
+    int ret = send_chunk(stream, query, offset, length);
+    if (ret) { return ret; }
+    uint64_t measured = upload_perf_now();
     ret = receive_receipt(stream, query ? -1 : (int)(offset + length));
     upload_perf_add(UP_RECEIPT_US, upload_perf_now() - measured);
     return ret;
@@ -416,15 +558,46 @@ static int request_chunk(struct https_stream *stream, bool query, size_t offset,
 
 static int upload(struct https_stream *stream)
 {
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    pending_response = 0;
+#endif
     int ret = request_chunk(stream, true, 0, 0);
     if (ret) { return ret; }
     size_t offset = atomic_get(&confirmed);
     atomic_set(&resume_from, offset);
     atomic_set(&bytes_sent, offset);
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    if (pipeline && offset < file_length) {
+        size_t endpoints[2], read_index = 0, count = 0, sent = offset;
+        upload_perf_begin(UP_PUT, session, segment, offset, file_length - offset);
+        while (sent < file_length || count) {
+            while (sent < file_length && count < ARRAY_SIZE(endpoints)) {
+                size_t length = MIN(job_tuning.chunk_size, file_length - sent);
+                ret = send_chunk(stream, false, sent, length);
+                if (ret) { goto pipe_done; }
+                sent += length;
+                endpoints[(read_index + count++) % ARRAY_SIZE(endpoints)] = sent;
+            }
+            uint64_t measured = upload_perf_now();
+            ret = receive_receipt(stream, endpoints[read_index]);
+            upload_perf_add(UP_RECEIPT_US, upload_perf_now() - measured);
+            if (ret) { goto pipe_done; }
+            if (!response_keep_alive && (count > 1 || sent < file_length)) {
+                ret = -ECONNRESET; goto pipe_done;
+            }
+            read_index = (read_index + 1) % ARRAY_SIZE(endpoints);
+            count--;
+        }
+        ret = check_cancel();
+pipe_done:
+        upload_perf_end(ret);
+        return ret;
+    }
+#endif
     while (offset < file_length) {
         ret = check_cancel();
         if (ret) { return ret; }
-        size_t length = MIN(UPLOAD_CHUNK, file_length - offset);
+        size_t length = MIN(job_tuning.chunk_size, file_length - offset);
         ret = request_chunk(stream, false, offset, length);
         if (ret) { return ret; }
         offset = atomic_get(&confirmed);
@@ -453,7 +626,8 @@ static int tls_connect(struct https_stream **stream)
     atomic_set(&tls_step, TLS_SETUP_HANDSHAKE);
     wifi_diag_capture(WIFI_DIAG_CONNECT_BEGIN, 0);
     ret = https_stream_open(stream, address->ai_addr, address->ai_addrlen,
-                            host, https_ca, sizeof(https_ca), check_cancel);
+                            host, https_ca, sizeof(https_ca), check_cancel, &job_tuning);
+    if (!ret) { atomic_set(&job_socket_verified, 1); }
     wifi_diag_capture(WIFI_DIAG_CONNECT_END, ret);
     zsock_freeaddrinfo(address);
     return ret;
@@ -832,6 +1006,18 @@ static int upload_file(struct https_stream **stream)
         ret = tls_connect(stream);
         upload_perf_end(ret);
     }
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    if (tls_probe) {
+        struct https_stream *second = NULL;
+        probe_snapshot(0, ret);
+        if (!ret) { ret = tls_connect(&second); }
+        probe_snapshot(1, ret);
+        if (!ret) { k_sleep(K_MSEC(500)); ret = check_cancel(); }
+        https_stream_close(second);
+        probe_snapshot(2, ret);
+        /* Capacity probes intentionally do not alter the server's recording. */
+    } else
+#endif
     if (!ret) {
         atomic_set(&tls_step, TLS_SETUP_HTTP);
         ret = upload(*stream);
@@ -884,14 +1070,101 @@ static int upload_file(struct https_stream **stream)
     return ret;
 }
 
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+static int dual_job(void)
+{
+    k_mutex_lock(&control_lock, K_FOREVER);
+    memset(&dual_result, 0, sizeof(dual_result));
+    k_mutex_unlock(&control_lock);
+    deadline = k_uptime_get() + 300000;
+    int ret = storage_ensure_mounted();
+    uint8_t destination[32];
+    if (!ret) { ret = destination_digest(destination); }
+    if (!ret) {
+        atomic_set(&stage, CONNECTING);
+        ret = wifi_station_connect(ssid, password, &cancelled);
+    }
+    if (!ret) { ret = sync_upload_time(); }
+    if (!ret) {
+        atomic_set(&stage, SENDING);
+        ret = upload_dual_run(&settings, &job_tuning, dual_parallel, session, segment,
+                              dual_session, dual_segment, destination,
+                              tls_connect, check_cancel, progress, &dual_result);
+        atomic_set(&cleanup_error, atomic_get(&dual_result.cleanup));
+    }
+    atomic_set(&dual_result.error, ret); atomic_set(&dual_result.finished, 1);
+    return ret;
+}
+#endif
+
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+static void dtls_progress(uint32_t sent, uint32_t stored)
+{
+    if (sent || stored) { atomic_set(&stage, SENDING); }
+    atomic_set(&bytes_sent, sent); atomic_set(&confirmed, stored); progress();
+}
+static int dtls_job(void)
+{
+    atomic_set(&stage, PREPARING);
+    atomic_clear(&bytes_sent); atomic_clear(&confirmed); atomic_clear(&resume_from);
+    atomic_clear(&total_bytes); atomic_clear(&state_error);
+    deadline = k_uptime_get() + 300000;
+    char path[STORAGE_PATH_MAX];
+    struct fs_dirent entry;
+    int ret = storage_ensure_mounted();
+    if (!ret) { ret = storage_build_chunk_path(session, segment, path, sizeof(path)); }
+    if (!ret) { ret = fs_stat(path, &entry); }
+    if (!ret) { atomic_set(&total_bytes, job_dtls_download >= 2 ? 4U * 1024U * 1024U : entry.size); }
+    if (!ret) {
+        atomic_set(&stage, CONNECTING);
+        ret = wifi_station_connect(ssid, password, &cancelled);
+    }
+    if (!ret) { ret = sync_upload_time(); }
+    struct dtls_bench_result result = {0};
+    if (!ret) {
+        atomic_set(&stage, TLS); progress();
+        ret = dtls_bench_run(path, host, port, token, https_ca, sizeof(https_ca),
+                             bench_chunk, sizeof(bench_chunk), job_dtls_window, job_dtls_download,
+                             check_cancel, dtls_progress, &result);
+    }
+    result.error = ret;
+    k_mutex_lock(&control_lock, K_FOREVER); last_dtls = result;
+    k_mutex_unlock(&control_lock);
+    return ret;
+}
+#endif
+
 static void worker(void *a, void *b, void *c)
 {
     ARG_UNUSED(a); ARG_UNUSED(b); ARG_UNUSED(c);
     for (;;) {
         if (k_sem_take(&start_job, K_SECONDS(1)) && !begin_auto()) { continue; }
+        k_mutex_lock(&control_lock, K_FOREVER);
+        job_tuning = tuning;
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+        job_dtls_window = dtls_window;
+        job_dtls_download = dtls_download;
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+        job_bench_cache = bench_cache_enabled;
+        bench_cached_length = 0;
+#endif
+        job_generation = tune_generation;
+        atomic_clear(&job_server_chunk); atomic_clear(&job_socket_verified);
+        k_mutex_unlock(&control_lock);
         struct https_stream *stream = NULL;
-        buffers = k_malloc(sizeof(*buffers));
-        int ret = buffers ? 0 : -ENOMEM;
+        int ret;
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+        if (job_dtls_window) { ret = dtls_job(); }
+        else
+#endif
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+        if (dual_session[0]) { ret = dual_job(); }
+        else
+#endif
+        {
+        buffers = k_malloc(sizeof(*buffers) + job_tuning.write_size);
+        ret = buffers ? 0 : -ENOMEM;
         if (!ret) {
             for (;;) {
                 ret = upload_file(&stream);
@@ -909,12 +1182,16 @@ static void worker(void *a, void *b, void *c)
                 if (!found || !next_auto_file()) { break; }
             }
         }
+        }
         struct k_work_sync sync;
         k_work_cancel_delayable_sync(&stall_work, &sync);
         https_stream_close(stream);
         int radio = wifi_off();
         if (!atomic_get(&cleanup_error)) { atomic_set(&cleanup_error, radio); }
         k_free(buffers); buffers = NULL;
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+        if (tls_probe) { probe_snapshot(3, ret); }
+#endif
         if (!ret) { ret = atomic_get(&cleanup_error); }
         if (atomic_get(&cancelled)) { ret = -ECANCELED; }
         else if (atomic_get(&stalled)) { ret = -ETIMEDOUT; }
@@ -928,7 +1205,11 @@ static void worker(void *a, void *b, void *c)
     }
 }
 /* Full ECDSA handshakes measured 5816 B; 6 KiB left only 328 B. */
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+K_THREAD_DEFINE(https_worker, 12288, worker, NULL, NULL, NULL, 7, 0, 0);
+#else
 K_THREAD_DEFINE(https_worker, 8192, worker, NULL, NULL, NULL, 7, 0, 0);
+#endif
 
 static int configure_network(char *args)
 {
@@ -986,6 +1267,10 @@ static int start_upload(char *args)
     unsigned long n = strtoul(split, &end, 10);
     if (!valid_session(args) || !*split || *end || !n || n > 999999999 ||
         !ssid[0] || !host[0]) { return -EINVAL; }
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    if (dual_session[0] && ((!strcmp(args, dual_session) && n == dual_segment) ||
+                            tuning.write_size != 2048)) { return -EINVAL; }
+#endif
     struct clip_event_result_info result;
     int ret = clip_post_event_sync(CLIP_EVENT_UPLOAD_BEGIN, &result);
     if (ret || result.result != CLIP_EVENT_OK) { return -EBUSY; }
@@ -997,11 +1282,177 @@ static int start_upload(char *args)
     return 0;
 }
 
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+static int tune_reply(char *out, size_t length)
+{
+    int n = snprintf(out, length,
+        "{\"ok\":true,\"data\":{\"schema\":1,\"persistent\":false,\"generation\":%u,"
+        "\"configured\":{\"chunk_bytes\":%u,\"write_bytes\":%u,\"send_bytes\":%u,\"nodelay\":%u},"
+        "\"last_job\":{\"valid\":%s,\"generation\":%u,\"chunk_bytes\":%u,\"write_bytes\":%u,"
+        "\"send_bytes\":%u,\"nodelay\":%u,\"server_max_chunk\":%u,\"socket_verified\":%s}}}\n",
+        (unsigned int)tune_generation, (unsigned int)tuning.chunk_size, (unsigned int)tuning.write_size,
+        (unsigned int)tuning.send_window, (unsigned int)tuning.nodelay,
+        job_generation ? "true" : "false", (unsigned int)job_generation,
+        (unsigned int)job_tuning.chunk_size, (unsigned int)job_tuning.write_size,
+        (unsigned int)job_tuning.send_window, (unsigned int)job_tuning.nodelay,
+        (unsigned int)atomic_get(&job_server_chunk), atomic_get(&job_socket_verified) ? "true" : "false");
+    return n < 0 || (size_t)n >= length ? -AT_ERR_NOMEM : n;
+}
+#endif
+
 static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
 {
     int ret = 0;
     char args[256] = {0};
     if (ctx->transport_type != TRANSPORT_TYPE_USB) { ret = -EACCES; goto reply; }
+#ifdef CONFIG_CLIP_UPLOAD_BENCH
+    if (!strcmp(ctx->name, "UPLOADCPU")) {
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending() || settings.enabled) { ret = -EBUSY; goto reply; }
+            if (!ctx->args || (strcmp(ctx->args, "64") && strcmp(ctx->args, "128"))) {
+                ret = -EINVAL; goto reply;
+            }
+            ret = upload_bench_cpu_set(!strcmp(ctx->args, "128") ? 128 : 64);
+            if (ret) { goto reply; }
+        }
+        return snprintf(response, length, "{\"ok\":true,\"data\":{\"mhz\":%u,\"persistent\":false}}\n",
+                        upload_bench_cpu_mhz());
+    }
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+    if (!strcmp(ctx->name, "UPLOADDTLS")) {
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending() || settings.enabled) { ret = -EBUSY; goto reply; }
+            if (!ctx->args) { ret = -EINVAL; goto reply; }
+            if (!strcmp(ctx->args, "off")) { dtls_window = 0; }
+            else if (!strcmp(ctx->args, "8")) { dtls_window = 8; }
+            else if (!strcmp(ctx->args, "16")) { dtls_window = 16; }
+            else if (!strcmp(ctx->args, "32")) { dtls_window = 32; }
+            else if (!strcmp(ctx->args, "burst")) { dtls_window = 64; }
+            else if (!strcmp(ctx->args, "down") || !strcmp(ctx->args, "downram") || !strcmp(ctx->args, "udp")) { dtls_window = 64; }
+            else { ret = -EINVAL; goto reply; }
+            dtls_download = !strcmp(ctx->args, "udp") ? 3 : !strcmp(ctx->args, "downram") ? 2 : !strcmp(ctx->args, "down") ? 1 : 0;
+        }
+        return snprintf(response, length,
+            "{\"ok\":true,\"data\":{\"transport\":\"%s\",\"last_transport\":\"%s\",\"direction\":\"%s\",\"last_direction\":\"%s\",\"window\":%u,\"last_window\":%u,"
+            "\"payload\":1024,\"run\":\"%s\",\"size\":%u,\"confirmed\":%u,\"packets\":%u,"
+            "\"retransmissions\":%u,\"acks\":%u,\"prepare_us\":%u,\"handshake_us\":%u,"
+            "\"transfer_us\":%u,\"fs_read_us\":%u,\"write_us\":%u,\"wait_us\":%u,\"raw_send_us\":%u,"
+            "\"read_us\":%u,\"raw_receive_us\":%u,\"fs_write_us\":%u,\"verify_us\":%u,\"sync_us\":%u,"
+            "\"received_bytes\":%u,\"repair_requests\":%u,\"duplicates\":%u,\"rejected_kind\":%u,\"rejected_offset\":%u,\"output\":\"%s\",\"sha256\":\"%s\",\"error\":%d,\"tls_error\":%d}}\n",
+            dtls_download == 3 ? "UDP" : "DTLS1.2/UDP", job_dtls_download == 3 ? "UDP" : "DTLS1.2/UDP",
+            dtls_download >= 2 ? "download-ram" : dtls_download ? "download" : "upload",
+            job_dtls_download >= 2 ? "download-ram" : job_dtls_download ? "download" : "upload",
+            dtls_window, job_dtls_window, last_dtls.run, last_dtls.size, last_dtls.confirmed,
+            last_dtls.packets, last_dtls.retransmissions, last_dtls.acknowledgments,
+            last_dtls.prepare_us, last_dtls.handshake_us, last_dtls.transfer_us,
+            last_dtls.fs_read_us, last_dtls.write_us, last_dtls.wait_us, last_dtls.raw_send_us,
+            last_dtls.read_us, last_dtls.raw_receive_us, last_dtls.fs_write_us, last_dtls.verify_us, last_dtls.sync_us,
+            last_dtls.received_bytes, last_dtls.repair_requests, last_dtls.duplicates, last_dtls.rejected_kind, last_dtls.rejected_offset, last_dtls.output, last_dtls.actual_sha256,
+            last_dtls.error, last_dtls.tls_error);
+    }
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+    if (!strcmp(ctx->name, "UPLOADCACHE")) {
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending() || settings.enabled ||
+                clip_event_get_state() != CLIP_STATE_IDLE) { ret = -EBUSY; goto reply; }
+            if (!ctx->args || (strcmp(ctx->args, "on") && strcmp(ctx->args, "off"))) {
+                ret = -EINVAL; goto reply;
+            }
+            bench_cache_enabled = !strcmp(ctx->args, "on");
+        }
+        return snprintf(response, length,
+            "{\"ok\":true,\"data\":{\"enabled\":%s,\"last_job\":%s,\"capacity\":%u}}\n",
+            bench_cache_enabled ? "true" : "false", job_bench_cache ? "true" : "false",
+            (unsigned int)sizeof(bench_chunk));
+    }
+#endif
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+    if (!strcmp(ctx->name, "UPLOADDUAL")) {
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending() || settings.enabled ||
+                clip_event_get_state() != CLIP_STATE_IDLE) { ret = -EBUSY; goto reply; }
+            if (!ctx->args || strlen(ctx->args) >= sizeof(args)) { ret = -EINVAL; goto reply; }
+            if (!strcmp(ctx->args, "off")) { dual_session[0] = 0; dual_segment = 0; }
+            else {
+                if (tls_probe || pipeline) { ret = -EBUSY; goto reply; }
+                strcpy(args, ctx->args);
+                char *selector = args;
+                bool parallel = true;
+                if (!strncmp(args, "serial,", 7)) { parallel = false; selector += 7; }
+                else if (!strncmp(args, "parallel,", 9)) { selector += 9; }
+                char *colon = strchr(selector, ':');
+                if (!colon) { ret = -EINVAL; goto reply; }
+                *colon++ = 0;
+                char *end;
+                unsigned long n = strtoul(colon, &end, 10);
+                if (!valid_session(selector) || !*colon || *end || !n || n > 999999999) {
+                    ret = -EINVAL; goto reply;
+                }
+                strcpy(dual_session, selector); dual_segment = n; dual_parallel = parallel;
+            }
+        }
+        return snprintf(response, length,
+            "{\"ok\":true,\"data\":{\"enabled\":%s,\"parallel\":%s,\"second\":\"%s:%u\",\"finished\":%s,"
+            "\"size\":[%u,%u],\"sent\":[%u,%u],\"confirmed\":[%u,%u],\"resumed\":[%u,%u],"
+            "\"elapsed_ms\":%u,\"transfer_ms\":%u,\"error\":%d,\"cleanup\":%d}}\n",
+            dual_session[0] ? "true" : "false", dual_parallel ? "true" : "false", dual_session, dual_segment,
+            atomic_get(&dual_result.finished) ? "true" : "false",
+            (unsigned)atomic_get(&dual_result.size[0]), (unsigned)atomic_get(&dual_result.size[1]),
+            (unsigned)atomic_get(&dual_result.sent[0]), (unsigned)atomic_get(&dual_result.sent[1]),
+            (unsigned)atomic_get(&dual_result.confirmed[0]), (unsigned)atomic_get(&dual_result.confirmed[1]),
+            (unsigned)atomic_get(&dual_result.resumed[0]), (unsigned)atomic_get(&dual_result.resumed[1]),
+            (unsigned)atomic_get(&dual_result.elapsed_ms), (unsigned)atomic_get(&dual_result.transfer_ms),
+            (int)atomic_get(&dual_result.error), (int)atomic_get(&dual_result.cleanup));
+    }
+    if (!strcmp(ctx->name, "UPLOADPIPE")) {
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending() || settings.enabled ||
+                clip_event_get_state() != CLIP_STATE_IDLE) { ret = -EBUSY; goto reply; }
+            if (!ctx->args || (strcmp(ctx->args, "on") && strcmp(ctx->args, "off"))) {
+                ret = -EINVAL; goto reply;
+            }
+            pipeline = !strcmp(ctx->args, "on");
+            if (pipeline && (tls_probe || dual_session[0])) { pipeline = false; ret = -EBUSY; goto reply; }
+        }
+        return snprintf(response, length, "{\"ok\":true,\"data\":{\"enabled\":%s,\"depth\":2}}\n",
+                        pipeline ? "true" : "false");
+    }
+    if (!strcmp(ctx->name, "UPLOADPROBE")) {
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending() || settings.enabled ||
+                clip_event_get_state() != CLIP_STATE_IDLE) { ret = -EBUSY; goto reply; }
+            if (!ctx->args || (strcmp(ctx->args, "on") && strcmp(ctx->args, "off"))) {
+                ret = -EINVAL; goto reply;
+            }
+            tls_probe = !strcmp(ctx->args, "on");
+            if (tls_probe && (pipeline || dual_session[0])) { tls_probe = false; ret = -EBUSY; goto reply; }
+            memset(&probe, 0, sizeof(probe));
+        }
+        return snprintf(response, length,
+            "{\"ok\":true,\"data\":{\"enabled\":%s,\"completed\":%u,\"result\":%d,"
+            "\"used\":[%u,%u,%u,%u],\"free\":[%u,%u,%u,%u],\"peak\":[%u,%u,%u,%u]}}\n",
+            tls_probe ? "true" : "false", probe.completed, probe.result,
+            probe.used[0], probe.used[1], probe.used[2], probe.used[3],
+            probe.free[0], probe.free[1], probe.free[2], probe.free[3],
+            probe.peak[0], probe.peak[1], probe.peak[2], probe.peak[3]);
+    }
+#endif
+    if (!strcmp(ctx->name, "UPLOADTUNE")) {
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending() || settings.enabled ||
+                clip_event_get_state() != CLIP_STATE_IDLE) { ret = -EBUSY; goto reply; }
+            struct upload_tuning candidate;
+            ret = upload_tune_parse(ctx->args, &candidate);
+            if (ret) { goto reply; }
+            tuning = candidate;
+            if (++tune_generation == 0) { tune_generation = 1; }
+        }
+        return tune_reply(response, length);
+    }
+#endif
 #ifdef CONFIG_CLIP_TCP_TRACE
     if (!strcmp(ctx->name, "TCPTRACE")) {
         ret = clip_tcp_trace_command(ctx->args, https_poc_active() || https_poc_record_pending(), response, length);
@@ -1057,6 +1508,12 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
          !strcmp(ctx->name, "UPLOADCLOCK")) && settings.enabled) { ret = -EBUSY; goto reply; }
     if (!strcmp(ctx->name, "UPLOADAUTO")) {
         if (strcmp(args, "on")) { ret = -EINVAL; goto reply; }
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+        if (dtls_window) { ret = -EBUSY; goto reply; }
+#endif
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+        if (tls_probe || pipeline || dual_session[0]) { ret = -EBUSY; goto reply; }
+#endif
         settings.enabled = 1; ret = upload_config_save(&settings); config_error = ret;
         if (ret) { settings.enabled = 0; config_saved = false; }
         else {
@@ -1123,11 +1580,28 @@ int https_poc_register(void)
     static const struct at_command commands[] = {
         {"NETCFG", AT_CMD_SET, command}, {"UPLOADCFG", AT_CMD_SET, command},
         {"UPTIME", AT_CMD_SET, command}, {"UPLOAD", AT_CMD_SET | AT_CMD_QUERY, command},
+#ifdef CONFIG_CLIP_UPLOAD_BENCH
+        {"UPLOADCPU", AT_CMD_SET | AT_CMD_QUERY, command},
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_DTLS
+        {"UPLOADDTLS", AT_CMD_SET | AT_CMD_QUERY, command},
+#endif
+#ifdef CONFIG_CLIP_UPLOAD_BENCH_CACHE
+        {"UPLOADCACHE", AT_CMD_SET | AT_CMD_QUERY, command},
+#endif
         {"UPLOADCANCEL", AT_CMD_EXEC, command},
         {"UPLOADSTATE", AT_CMD_SET, command}, {"UPLOADLIST", AT_CMD_SET, command},
         {"UPLOADAUTO", AT_CMD_SET | AT_CMD_QUERY, command},
         {"UPLOADSAVE", AT_CMD_EXEC, command}, {"UPLOADCLEAR", AT_CMD_EXEC, command},
         {"UPLOADCLOCK", AT_CMD_SET, command},
+#ifdef CONFIG_CLIP_HTTPS_TUNING
+        {"UPLOADTUNE", AT_CMD_SET | AT_CMD_QUERY, command},
+#ifdef CONFIG_CLIP_HTTPS_EXPERIMENT
+        {"UPLOADPROBE", AT_CMD_SET | AT_CMD_QUERY, command},
+        {"UPLOADPIPE", AT_CMD_SET | AT_CMD_QUERY, command},
+        {"UPLOADDUAL", AT_CMD_SET | AT_CMD_QUERY, command},
+#endif
+#endif
 #ifdef CONFIG_CLIP_TCP_TRACE
         {"TCPTRACE", AT_CMD_SET, command},
 #endif
@@ -1141,6 +1615,12 @@ int https_poc_register(void)
     }
     ret = upload_config_init(&settings);
     config_error = ret; config_saved = !ret && ssid[0];
+#ifdef CONFIG_CLIP_UPLOAD_BENCH
+    /* Dedicated measurements start manually. Preserve the product's saved
+     * enable bit on disk; an operator may explicitly enable uploads later. */
+    if (settings.enabled) { config_saved = false; }
+    settings.enabled = 0;
+#endif
     if (!settings.clock_host[0]) {
         strcpy(settings.clock_host, "time.cloudflare.com"); strcpy(settings.clock_port, "123");
     }

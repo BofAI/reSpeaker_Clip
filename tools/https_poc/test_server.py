@@ -241,6 +241,40 @@ class ReceiverTest(unittest.TestCase):
             if own_connection:
                 conn.close()
 
+    def test_receiver_opt_in_enforces_limit_and_resumes(self):
+        for limit in (32768, 65536, 131072):
+            with self.subTest(limit=limit):
+                recording = b'x' * (limit + 123)
+                self.assertEqual(self.resume_request('PUT', 550, recording, 0, recording[:limit])[0], 400)
+                with tempfile.TemporaryDirectory() as directory:
+                    server = Receiver(('127.0.0.1', 0), directory, 'clip-test', self.token,
+                                      max_chunk=limit)
+                    server.socket = self.server_context.wrap_socket(server.socket, server_side=True,
+                                                                    do_handshake_on_connect=False)
+                    thread = threading.Thread(target=server.serve_forever, daemon=True)
+                    thread.start()
+                    conn = http.client.HTTPSConnection('localhost', server.server_port,
+                                                        context=self.context, timeout=3)
+                    try:
+                        self.assertEqual(self.resume_request('PUT', 550, recording, 0,
+                                                             recording[:(limit + 1)], conn=conn)[0], 400)
+                        self.assertEqual(self.resume_request('GET', 550, recording, conn=conn)[1]['offset'], 0)
+                        self.assertEqual(self.resume_request('PUT', 550, recording, 0,
+                                                             recording[:limit], conn=conn)[1]['offset'], limit)
+                        self.assertEqual(self.resume_request('PUT', 550, recording, 0,
+                                                             recording[:limit], conn=conn)[0], 200)
+                        self.assertEqual(self.resume_request('GET', 550, recording, conn=conn)[1]['offset'], limit)
+                        result = self.resume_request('PUT', 550, recording, limit,
+                                                     recording[limit:], conn=conn)
+                        self.assertEqual((result[0], result[1]['status']), (201, 'stored'))
+                        identity = hashlib.sha256(b'clip-test/20261020000000/550').hexdigest()
+                        self.assertEqual((Path(directory) / (identity + '.bin')).read_bytes(), recording)
+                    finally:
+                        conn.close()
+                        server.shutdown()
+                        server.server_close()
+                        thread.join()
+
     def test_resume_reuses_tls_and_checks_every_durable_offset(self):
         recording = bytes(range(256)) * 180
         conn = http.client.HTTPSConnection("localhost", self.server.server_port,
