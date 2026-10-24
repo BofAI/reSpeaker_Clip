@@ -124,8 +124,9 @@ the additional cache. These samples do not establish long-run or weak-network
 reliability. Raw records, ELF/map files and rollback images stay in the local
 firmware version directories, not in Git.
 
-When `CONFIG_CLIP_DTLS_PROFILE=y`, USB controls are RAM-only and reject SET
-while an upload or recording handoff is pending:
+When `CONFIG_CLIP_DTLS_PROFILE=y`, USB configuration controls are RAM-only and
+reject SET while an upload or recording handoff is pending. The read-only
+`timing` snapshot remains available during the next file's upload:
 
 - `AT+UPLOADNET=timing`: read the last completed DATA-phase timing snapshot.
 - `AT+UPLOADNET=window`: read initial and maximum packet counts.
@@ -136,7 +137,10 @@ while an upload or recording handoff is pending:
 These controls do not persist; reboot restores the build defaults. The base
 overlay restores16/64 and4KiB; the optimized preset restores128/128 and8KiB.
 The existing `AT+UPLOADNET?` response is unchanged. Timing is buffered in RAM
-without per-packet printing. SD read/seek values are nested under source time;
+without per-packet printing. The snapshot describes the last completed file,
+not the file currently being sent. A collector should correlate stable statistics
+and timing with completed DATA events and verify that every file was observed.
+SD read/seek values are nested under source time;
 window-full poll time is nested under poll time. Do not add nested values twice
 or treat these wall-time counters as isolated CPU time.
 

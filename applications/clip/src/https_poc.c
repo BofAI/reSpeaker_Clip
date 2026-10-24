@@ -1278,6 +1278,11 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
     if (!strcmp(ctx->name, "UPLOADNET")) {
 #ifdef CONFIG_CLIP_DTLS_PROFILE
         if (ctx->type == AT_CMD_TYPE_SET) {
+            /* Read the last completed file under control_lock, even while the
+             * worker sends the next file. Mutating commands still require idle. */
+            if (ctx->args && !strcmp(ctx->args, "timing")) {
+                return dtls_profile_format(&last_datagram.timing, response, length);
+            }
             if (https_poc_active() || https_poc_record_pending()) { ret = -EBUSY; goto reply; }
 #ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
             if (ctx->args && (!strncmp(ctx->args, "measure,", 8) || !strncmp(ctx->args, "measure-cache,", 14))) {
@@ -1292,9 +1297,6 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
                     id, fresh ? "true" : "false");
             }
 #endif
-            if (ctx->args && !strcmp(ctx->args, "timing")) {
-                return dtls_profile_format(&last_datagram.timing, response, length);
-            }
             ret = ctx->args && !strncmp(ctx->args, "cache", 5) ?
                 configure_datagram_cache(ctx->args, response, length) :
                 configure_datagram_window(ctx->args, response, length);
