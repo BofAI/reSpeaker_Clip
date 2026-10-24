@@ -234,7 +234,7 @@ typedef uint32_t psa_algorithm_t;
 '''
                 text = (ROOT / 'applications/clip/src/dtls_profile.c').read_text()
                 support += '\n'.join(line for line in text.splitlines() if not line.startswith('#include'))
-            (root / 'client.c').write_text(SHIM + support + source + MAIN)
+            (root / 'client.c').write_text(SHIM + '\n#include "upload_perf.h"\n' + support + source + MAIN)
             subprocess.run(['clang', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
                             '-DCONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS='+str(initial),
                             '-DCONFIG_CLIP_DTLS_WINDOW_PACKETS='+str(ceiling),

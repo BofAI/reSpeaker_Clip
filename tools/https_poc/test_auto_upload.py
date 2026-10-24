@@ -200,12 +200,27 @@ int main(void){
  assert(refill_auto_batch()==1&&auto_batch->first_count==1);
  assert(next_auto_file()&&segment==1); /* Wrap discovers earlier/new work. */
  items[0].state=UPLOAD_STORED;assert(refill_auto_batch()==0);
+#ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
+ /* A measurement replays stored files in exactly one session, once only. */
+ cursor_session[0]=0;cursor_segment=0;
+ strcpy(measurement_session,items[0].id);
+ assert(refill_auto_batch()==1&&auto_batch->first_count==3);
+ for(unsigned n=1;n<=3;n++)assert(next_auto_file()&&segment==n&&!strcmp(session,measurement_session));
+ assert(refill_auto_batch()==0); /* Must not wrap and replay forever. */
+ strcpy(measurement_session,items[3].id);cursor_session[0]=0;cursor_segment=0;
+ assert(refill_auto_batch()==0); /* Active/unsealed recording stays excluded. */
+ auto_job=1;schedule_after_job(0);assert(!measurement_session[0]);
+ auto_batch=k_calloc(1,sizeof(*auto_batch));
+#endif
  k_free(auto_batch);auto_batch=NULL;
  allocation_failure=1;now=next_auto;assert(!begin_auto()&&!active&&!auto_job&&scan_error==-ENOMEM&&!auto_batch);
  return 0;
 }
 '''
         compile_run(code)
+        diagnostic = code.replace('static char cursor_session[15],session[32];',
+                                  'static char cursor_session[15],session[32],measurement_session[15];')
+        compile_run('#define CONFIG_CLIP_DTLS_PREPARE_MEASURE 1\n' + diagnostic)
 
     def test_filesystem_scan_exceeds_session_limit_and_cleans_up_on_cancel(self):
         import datetime

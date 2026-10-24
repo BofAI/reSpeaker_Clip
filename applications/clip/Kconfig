@@ -72,6 +72,15 @@ config CLIP_HTTPS_PROFILE
 	  Opt-in bounded RAM event ring; no audio or credential logging.
 	  Disabled builds compile timing hooks to no-ops.
 
+config CLIP_DTLS_PREPARE_MEASURE
+	bool "Diagnostic DTLS session replay and preparation measurement"
+	depends on CLIP_DTLS_PROFILE && CLIP_HTTPS_PROFILE
+	default n
+	help
+	  Diagnostic-only session filter, one-pass replay and fresh hash calculation.
+	  Allows idle session deletion only while automatic upload is disabled.
+	  Does not alter transport parameters or file contents.
+
 config CLIP_TCP_TRACE
 	bool "Passive TCP retransmission observations via USB"
 	depends on CLIP_WIFI_DIAG && NET_TCP_CONGESTION_AVOIDANCE && NET_TCP_FAST_RETRANSMIT

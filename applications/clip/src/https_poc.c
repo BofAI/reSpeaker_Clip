@@ -87,6 +87,9 @@ static int config_error, scan_error;
 static bool config_saved;
 static uint32_t failures, cursor_segment;
 static char cursor_session[15];
+#ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
+static char measurement_session[15];
+#endif
 static int64_t next_auto, time_synced_at;
 static atomic_val_t observed_activity;
 static char session[32];
@@ -163,6 +166,12 @@ void https_poc_record_complete(enum clip_event_result result)
 
 bool https_poc_command_allowed(const char *name)
 {
+#ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
+    if (!strcmp(name, "DELETE")) {
+        return !https_poc_active() && !https_poc_record_pending() &&
+               !settings.enabled && clip_event_get_state() == CLIP_STATE_IDLE;
+    }
+#endif
     /* Read-only instrumentation must remain available during TLS/upload. */
     if (!strcmp(name, "RES")) { return true; }
 #ifdef CONFIG_CLIP_TCP_TRACE
@@ -277,17 +286,21 @@ static bool valid_session(const char *s)
 
 static int hash_file_range(size_t offset, size_t length, char output[65])
 {
+    uint64_t measured = upload_perf_now();
     int ret = fs_seek(&file, offset, FS_SEEK_SET);
+    upload_perf_add(UP_SEEK_US, upload_perf_now() - measured);
     if (ret) { return ret; }
     mbedtls_sha256_context hash;
     uint8_t digest[32];
+    measured = upload_perf_now();
     mbedtls_sha256_init(&hash);
     ret = mbedtls_sha256_starts(&hash, 0);
+    upload_perf_add(UP_HASH_US, upload_perf_now() - measured);
     size_t total = 0;
     while (!ret && total < length) {
         ret = check_cancel();
         if (ret) { break; }
-        uint64_t measured = upload_perf_now();
+        measured = upload_perf_now();
         ssize_t n = fs_read(&file, io, MIN(sizeof(io), length - total));
         upload_perf_add(UP_READ_US, upload_perf_now() - measured);
         upload_perf_add(UP_FS_READS, 1);
@@ -297,11 +310,16 @@ static int hash_file_range(size_t offset, size_t length, char output[65])
         ret = mbedtls_sha256_update(&hash, io, n);
         upload_perf_add(UP_HASH_US, upload_perf_now() - measured);
     }
+    measured = upload_perf_now();
     if (!ret) { ret = mbedtls_sha256_finish(&hash, digest); }
     mbedtls_sha256_free(&hash);
+    upload_perf_add(UP_HASH_US, upload_perf_now() - measured);
     if (ret) { return ret; }
     for (int i = 0; i < 32; i++) { snprintf(output + i * 2, 3, "%02x", digest[i]); }
-    return fs_seek(&file, offset, FS_SEEK_SET);
+    measured = upload_perf_now();
+    ret = fs_seek(&file, offset, FS_SEEK_SET);
+    upload_perf_add(UP_SEEK_US, upload_perf_now() - measured);
+    return ret;
 }
 
 static int hash_file(void) { return hash_file_range(0, file_length, expected_hash); }
@@ -607,6 +625,17 @@ static int choose_visit(const char *id, uint32_t number, uint32_t size, bool sea
 {
     struct selection *selection = context;
     if (!sealed || !size || size > MAX_FILE) { return 0; }
+#ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
+    if (measurement_session[0]) {
+        /* Replay each sealed file once, including already-uploaded files.
+         * Never wrap to the first file when the final batch is drained. */
+        if (strcmp(id, measurement_session) ||
+            compare_key(id, number, cursor_session, cursor_segment) <= 0) { return 0; }
+        add_candidate(selection->first, &selection->first_count, id, number);
+        add_candidate(selection->after, &selection->after_count, id, number);
+        return 0;
+    }
+#endif
     struct upload_file_record record;
     int ret = upload_state_load(id, number, &record);
     if (ret && ret != -ENOENT && ret != -EBADMSG) { return ret; }
@@ -802,6 +831,9 @@ static int sync_upload_time(void)
 static void schedule_after_job(int ret)
 {
         k_mutex_lock(&control_lock, K_FOREVER);
+#ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
+        measurement_session[0] = 0;
+#endif
         k_free(auto_batch); auto_batch = NULL;
         if (atomic_get(&auto_job)) {
             if (!ret) { failures = 0; next_auto = k_uptime_get() + 5000; }
@@ -907,7 +939,12 @@ static int upload_file(struct https_stream **stream)
         uint8_t destination[32];
         ret = destination_digest(destination);
         int loaded = ret ? ret : upload_state_load(session, segment, &cached);
-        if (!ret && !loaded && cached.size == file_length &&
+        bool fresh_hash = false;
+#ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
+        fresh_hash = !strcmp(measurement_session, session);
+#endif
+        if (!ret && fresh_hash && (!loaded || loaded == -ENOENT || loaded == -EBADMSG)) { ret = hash_file(); }
+        else if (!ret && !loaded && cached.size == file_length &&
             !memcmp(cached.destination_sha256, destination, sizeof(destination))) {
             /* Sealed segments are immutable. Reuse their CRC-protected hash;
              * final server SHA256 still detects SD corruption before COMPLETE. */
@@ -952,8 +989,10 @@ static int upload_file(struct https_stream **stream)
     ARG_UNUSED(stream);
     bool reused = datagram != NULL;
     if (!ret && !datagram) {
+        upload_perf_begin(UP_TLS, session, segment, 0, file_length);
         atomic_set(&stage, TLS); atomic_set(&tls_step, TLS_SETUP_HANDSHAKE);
         ret = dtls_upload_open(&datagram, host, port, https_ca, sizeof(https_ca), check_cancel);
+        upload_perf_end(ret);
     }
     if (!ret) {
         atomic_set(&tls_step, TLS_SETUP_HTTP);
@@ -1221,6 +1260,16 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
 #ifdef CONFIG_CLIP_DTLS_PROFILE
         if (ctx->type == AT_CMD_TYPE_SET) {
             if (https_poc_active() || https_poc_record_pending()) { ret = -EBUSY; goto reply; }
+#ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
+            if (ctx->args && !strncmp(ctx->args, "measure,", 8)) {
+                const char *id = ctx->args + 8;
+                if (settings.enabled || clip_event_get_state() != CLIP_STATE_IDLE) { ret = -EBUSY; goto reply; }
+                if (!valid_session(id)) { ret = -EINVAL; goto reply; }
+                strcpy(measurement_session, id);
+                return snprintf(response, length,
+                    "{\"ok\":true,\"data\":{\"measure_session\":\"%s\",\"fresh_hash\":true,\"one_pass\":true}}\n", id);
+            }
+#endif
             if (ctx->args && !strcmp(ctx->args, "timing")) {
                 return dtls_profile_format(&last_datagram.timing, response, length);
             }

@@ -1,6 +1,7 @@
 /* DTLS recording transfer v3. Durability is an application-layer promise. */
 #include "dtls_upload.h"
 #include "upload_window.h"
+#include "upload_perf.h"
 #include <zephyr/kernel.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/sys/byteorder.h>
@@ -222,6 +223,7 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
     memcpy(request + at, id->sha256, 32); at += 32;
     request[at++] = secret; memcpy(request + at, id->credential, secret); at += secret;
     header(s, request, OPEN, 0, at - HEADER);
+    upload_perf_begin(UP_GET, id->session, id->segment, 0, id->size);
     int ret = -ETIMEDOUT;
     /* OPEN has an arbitrary durable starting offset, so initialize after its
      * identity-bound receipt. Delayed OPEN ACKs are valid normal ACKs later. */
@@ -246,7 +248,9 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
         break;
     }
     memset(request, 0, sizeof(request));
+    upload_perf_end(ret);
     if (ret) { return ret; }
+    upload_perf_begin(UP_PUT, id->session, id->segment, stats->resume_from, id->size);
     progress(s->window.next, s->window.received, s->window.durable, stats->resume_from);
 #ifdef CONFIG_CLIP_DTLS_PROFILE
     dtls_profile_begin();
@@ -298,5 +302,6 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
     stats->retransmissions = s->window.retransmissions;
     stats->rtt_ms = s->window.srtt_ms; stats->rto_ms = s->window.rto_ms;
     stats->window_packets = s->window.cwnd;
+    upload_perf_end(ret);
     return ret;
 }
