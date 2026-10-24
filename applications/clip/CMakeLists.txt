@@ -17,6 +17,19 @@ if(CONFIG_CLIP_WIFI_DIAG)
     include(wifi-trace.cmake)
 endif()
 
+# TLS timing uses a generated source copy so LTO cannot bypass the AEAD hooks.
+if(CONFIG_CLIP_DTLS_PROFILE)
+    target_sources(app PRIVATE src/dtls_profile.c)
+    execute_process(COMMAND "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../tools/https_poc/instrument_dtls_crypto.py"
+        --zephyr "${ZEPHYR_BASE}" --output "${_trace_dir}/ssl_msg.c"
+        RESULT_VARIABLE _dtls_timing_result)
+    if(NOT _dtls_timing_result EQUAL 0)
+        message(FATAL_ERROR "Pinned SDK DTLS timing could not be generated")
+    endif()
+    clip_trace_source(mbedtls ../modules/crypto/mbedtls/library/ssl_msg.c)
+endif()
+
 # Include directories
 target_include_directories(app PRIVATE include)
 

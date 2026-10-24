@@ -24,7 +24,18 @@ struct dtls_upload {
     uint32_t intermediate, final;
     uint8_t id[8], wire[HEADER + UPLOAD_PACKET_BYTES];
     struct upload_window window;
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+    uint16_t initial_window, window_ceiling;
+#endif
 };
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+int dtls_upload_set_window(struct dtls_upload *s, unsigned int initial, unsigned int ceiling)
+{
+    if (!s || initial < 16 || initial > ceiling || ceiling > UPLOAD_WINDOW_MAX) { return -EINVAL; }
+    s->initial_window = initial; s->window_ceiling = ceiling;
+    return 0;
+}
+#endif
 static int random_bytes(void *unused, unsigned char *out, size_t length)
 {
     ARG_UNUSED(unused);
@@ -33,17 +44,25 @@ static int random_bytes(void *unused, unsigned char *out, size_t length)
 static int transmit(void *context, const unsigned char *data, size_t length)
 {
     struct dtls_upload *s = context;
+    uint64_t measured = dtls_profile_now();
     int ret = zsock_send(s->fd, data, length, ZSOCK_MSG_DONTWAIT);
+    int error = errno;
+    dtls_profile_add(DP_UDP_SEND, dtls_profile_now() - measured);
     if (ret >= 0) { return ret; }
-    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ?
+    if (error == EAGAIN || error == EWOULDBLOCK) { dtls_profile_add(DP_TX_BLOCKED, 0); }
+    return error == EAGAIN || error == EWOULDBLOCK || error == EINTR ?
         MBEDTLS_ERR_SSL_WANT_WRITE : MBEDTLS_ERR_NET_SEND_FAILED;
 }
 static int receive(void *context, unsigned char *data, size_t length)
 {
     struct dtls_upload *s = context;
+    uint64_t measured = dtls_profile_now();
     int ret = zsock_recv(s->fd, data, length, ZSOCK_MSG_DONTWAIT);
+    int error = errno;
+    dtls_profile_add(DP_UDP_RECV, dtls_profile_now() - measured);
     if (ret >= 0) { return ret; }
-    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR ?
+    if (error == EAGAIN || error == EWOULDBLOCK) { dtls_profile_add(DP_RX_EMPTY, 0); }
+    return error == EAGAIN || error == EWOULDBLOCK || error == EINTR ?
         MBEDTLS_ERR_SSL_WANT_READ : MBEDTLS_ERR_NET_RECV_FAILED;
 }
 static void set_timer(void *context, uint32_t intermediate, uint32_t final)
@@ -65,8 +84,11 @@ static int wait_for(struct dtls_upload *s, int want, int64_t deadline)
     if (left <= 0) { return -ETIMEDOUT; }
     struct zsock_pollfd poll = {.fd = s->fd,
         .events = want == MBEDTLS_ERR_SSL_WANT_WRITE ? ZSOCK_POLLOUT : ZSOCK_POLLIN};
+    uint64_t measured = dtls_profile_now();
     ret = zsock_poll(&poll, 1, (int)MIN(left, 50));
-    if (ret < 0 && errno != EINTR) { return -errno; }
+    int error = errno;
+    dtls_profile_poll(want == MBEDTLS_ERR_SSL_WANT_WRITE, dtls_profile_now() - measured);
+    if (ret < 0 && error != EINTR) { return -error; }
     if (poll.revents & ZSOCK_POLLNVAL) { return -EBADF; }
     return s->check();
 }
@@ -86,6 +108,9 @@ int dtls_upload_open(struct dtls_upload **out, const char *host, const char *por
     struct dtls_upload *s = k_calloc(1, sizeof(*s));
     if (!s) { return -ENOMEM; }
     s->fd = -1; s->check = check;
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+    dtls_upload_set_window(s, CONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS, CONFIG_CLIP_DTLS_WINDOW_PACKETS);
+#endif
     mbedtls_ssl_init(&s->ssl); mbedtls_ssl_config_init(&s->config); mbedtls_x509_crt_init(&s->ca);
     struct zsock_addrinfo hints = {.ai_family = AF_INET, .ai_socktype = SOCK_DGRAM}, *address = NULL;
     if (zsock_getaddrinfo(host, port, &hints, &address)) { ret = -EHOSTUNREACH; }
@@ -137,7 +162,9 @@ static int send_packet(struct dtls_upload *s, const uint8_t *packet, size_t leng
     int64_t deadline = k_uptime_get() + 3000;
     for (;;) {
         int ret = s->check(); if (ret) { return ret; }
+        uint64_t measured = dtls_profile_now();
         ret = mbedtls_ssl_write(&s->ssl, packet, length);
+        dtls_profile_add(DP_TLS_WRITE, dtls_profile_now() - measured);
         if (ret == (int)length) { return 0; }
         if (ret != MBEDTLS_ERR_SSL_WANT_READ && ret != MBEDTLS_ERR_SSL_WANT_WRITE) { return -EIO; }
         ret = wait_for(s, ret, deadline); if (ret) { return ret; }
@@ -147,7 +174,9 @@ static int read_packet(struct dtls_upload *s, int64_t deadline)
 {
     for (;;) {
         int ret = s->check(); if (ret) { return ret; }
+        uint64_t measured = dtls_profile_now();
         ret = mbedtls_ssl_read(&s->ssl, s->wire, sizeof(s->wire));
+        dtls_profile_add(DP_TLS_READ, dtls_profile_now() - measured);
         if (ret > 0) {
             if (ret < (int)HEADER || memcmp(s->wire, "CU01", 4) || s->wire[5] || s->wire[6] || s->wire[7] ||
                 sys_get_be32(s->wire + 12) != (uint32_t)ret - HEADER) { return -EBADMSG; }
@@ -203,7 +232,14 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
         if (n < 0) { ret = n; break; }
         if ((s->wire[4] == ACK || s->wire[4] == COMPLETE) && n == (int)(HEADER + RECEIPT)) {
             uint32_t durable = sys_get_be32(s->wire + 8);
-            ret = upload_window_init(&s->window, id->size, durable, CONFIG_CLIP_DTLS_WINDOW_PACKETS);
+            unsigned int ceiling = CONFIG_CLIP_DTLS_WINDOW_PACKETS;
+            unsigned int initial = CONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS;
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+            ceiling = s->window_ceiling;
+            initial = s->initial_window;
+#endif
+            ret = upload_window_init(&s->window, id->size, durable, ceiling);
+            if (!ret) { s->window.cwnd = initial; }
             if (!ret) { ret = accept_packet(s, id, n); }
         } else { ret = accept_packet(s, id, n); }
         if (ret >= 0) { stats->resume_from = s->window.durable; ret = 0; }
@@ -212,6 +248,9 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
     memset(request, 0, sizeof(request));
     if (ret) { return ret; }
     progress(s->window.next, s->window.received, s->window.durable, stats->resume_from);
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+    dtls_profile_begin();
+#endif
     int64_t started = k_uptime_get(), last_query = started, last_reply = started;
     while (!ret && !s->window.complete) {
         uint32_t offset;
@@ -220,7 +259,9 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
         if (selected) {
             uint32_t length = MIN(UPLOAD_PACKET_BYTES, id->size - offset);
             header(s, s->wire, DATA, offset, length);
+            uint64_t measured = dtls_profile_now();
             ret = read_at(offset, s->wire + HEADER, length);
+            dtls_profile_add(DP_SOURCE, dtls_profile_now() - measured);
             if (!ret) { ret = send_packet(s, s->wire, HEADER + length); }
             if (!ret) { ret = upload_window_sent(&s->window, offset, (uint32_t)k_uptime_get()); }
             if (ret) { break; }
@@ -230,7 +271,10 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
         /* Drain ready receipts between sends. Otherwise wait at most20ms so
          * packet timers, cancellation and pacing do not depend on a peer. */
         int64_t end = k_uptime_get() + (selected ? 0 : 20);
+        dtls_profile_window(!selected && s->window.next < s->window.size &&
+            s->window.next >= s->window.received + s->window.cwnd * UPLOAD_PACKET_BYTES);
         int n = read_packet(s, end);
+        dtls_profile_window(false);
         if (n > 0) {
             ret = accept_packet(s, id, n);
             if (ret >= 0) {
@@ -246,6 +290,9 @@ int dtls_upload_file(struct dtls_upload *s, const struct dtls_upload_identity *i
             ret = send_packet(s, query, sizeof(query)); last_query = now;
         }
     }
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+    dtls_profile_end(&stats->timing);
+#endif
     stats->elapsed_ms = k_uptime_get() - started;
     stats->received = s->window.received; stats->durable = s->window.durable;
     stats->retransmissions = s->window.retransmissions;

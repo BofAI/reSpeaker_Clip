@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
+#include "dtls_profile.h"
 struct dtls_upload;
 struct dtls_upload_identity {
     const char *device, *session, *credential;
@@ -13,6 +14,9 @@ struct dtls_upload_identity {
 struct dtls_upload_stats {
     uint32_t elapsed_ms, sent_packets, retransmissions, receipts;
     uint32_t received, durable, resume_from, rtt_ms, rto_ms, window_packets;
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+    struct dtls_profile_result timing;
+#endif
 };
 typedef int (*dtls_upload_read_fn)(uint32_t offset, uint8_t *out, size_t length);
 typedef void (*dtls_upload_progress_fn)(uint32_t sent, uint32_t received,
@@ -23,4 +27,9 @@ int dtls_upload_file(struct dtls_upload *connection, const struct dtls_upload_id
                       dtls_upload_read_fn read_at, dtls_upload_progress_fn progress,
                       struct dtls_upload_stats *stats);
 void dtls_upload_close(struct dtls_upload *connection);
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+/* Experiment only: owner sets before a file, never during its transfer. */
+int dtls_upload_set_window(struct dtls_upload *connection, unsigned int initial,
+                           unsigned int ceiling);
+#endif
 #endif

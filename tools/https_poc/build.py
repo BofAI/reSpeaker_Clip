@@ -4,6 +4,14 @@ import os
 from pathlib import Path
 import subprocess
 
+PRESETS = {
+    "dtls-optimized": (
+        "runtime.conf", "netdiag.conf", "https-connect-budget.conf",
+        "https-wifi-no-stbc.conf", "https-arp-backport.conf", "dtls-upload.conf",
+        "wifi-auth-log.conf", "dtls-aead-hardware.conf",
+        "dtls-upload-optimized.conf", "dtls-profile.conf",
+    ),
+}
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -11,6 +19,8 @@ def main():
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--build", type=Path, required=True)
     parser.add_argument("--ca", type=Path, required=True)
+    parser.add_argument("--preset", choices=PRESETS,
+                        help="named full-application candidate configuration")
     parser.add_argument("--extra-conf", type=Path, action="append", default=[],
                         help="additional app-only config, appended after https.conf")
     args = parser.parse_args()
@@ -24,7 +34,9 @@ def main():
         parser.error("refusing to overwrite the baseline build")
     env = dict(os.environ, ZEPHYR_EXTRA_MODULES=str(repo),
                ZEPHYR_SDK_INSTALL_DIR=str(args.sdk.resolve()), CLIP_HTTPS_CA_FILE=str(ca))
-    configs = [repo / "applications/clip/https.conf", *[p.resolve() for p in args.extra_conf]]
+    configs = [repo / "applications/clip/https.conf",
+               *[repo / "applications/clip" / name for name in PRESETS.get(args.preset, ())],
+               *[p.resolve() for p in args.extra_conf]]
     if any(not p.is_file() for p in configs):
         parser.error("each --extra-conf must be an existing file")
     command = ["west", "build", "--cmake", "--sysbuild", "-b", "clip/nrf5340/cpuapp",

@@ -23,6 +23,14 @@ config CLIP_DTLS_UPLOAD
 	  selective receive credit and server-authoritative durable checkpoints.
 	  Reuses the existing scheduler, configuration and independent A/B state.
 
+config CLIP_DTLS_PROFILE
+	bool "DTLS data-phase timing counters"
+	depends on CLIP_DTLS_UPLOAD && CLIP_WIFI_DIAG
+	default n
+	help
+	  Measure source reads, AEAD, UDP calls and explicit waits in RAM.
+	  Uses pinned build-local TLS source instrumentation, with no log output.
+
 config CLIP_DTLS_WINDOW_PACKETS
 	int "Maximum logical DTLS in-flight packets"
 	depends on CLIP_DTLS_UPLOAD
@@ -30,7 +38,24 @@ config CLIP_DTLS_WINDOW_PACKETS
 	default 64
 	help
 	  One packet is 1024 bytes. Only retransmission metadata occupies RAM;
-	  payload is reread from SD. Congestion control starts at16 packets.
+	  payload is reread from SD. The initial window is configured separately.
+
+config CLIP_DTLS_INITIAL_WINDOW_PACKETS
+	int "Initial logical DTLS in-flight packets"
+	depends on CLIP_DTLS_UPLOAD
+	range 16 128
+	default 16
+	help
+	  Must not exceed CLIP_DTLS_WINDOW_PACKETS. Loss still reduces the window.
+
+config CLIP_DTLS_READ_CACHE_BYTES
+	int "DTLS DATA read-ahead cache bytes"
+	depends on CLIP_DTLS_UPLOAD
+	range 4096 16384
+	default 4096
+	help
+	  Sizes above4096 allocate a separate per-file heap buffer. The4KiB hash
+	  buffer is retained. This setting also applies when timing is disabled.
 
 config CLIP_HTTPS_POC
 	bool "Experimental USB-controlled HTTPS upload"

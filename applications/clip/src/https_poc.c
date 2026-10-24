@@ -21,6 +21,14 @@ static struct dtls_upload *datagram;
 static struct dtls_upload_stats last_datagram;
 static atomic_t datagram_received;
 static uint32_t cache_offset, cache_length;
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+static uint16_t datagram_initial_window = CONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS;
+static uint16_t datagram_window_ceiling = CONFIG_CLIP_DTLS_WINDOW_PACKETS;
+#endif
+static uint16_t datagram_cache_bytes = CONFIG_CLIP_DTLS_READ_CACHE_BYTES;
+static uint8_t *datagram_cache;
+BUILD_ASSERT(CONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS <= CONFIG_CLIP_DTLS_WINDOW_PACKETS,
+             "Initial DTLS window must not exceed its ceiling");
 #endif
 #include "upload_perf.h"
 #ifdef CONFIG_CLIP_TCP_TRACE
@@ -810,20 +818,28 @@ static void schedule_after_job(int ret)
 #ifdef CONFIG_CLIP_DTLS_UPLOAD
 static int datagram_read(uint32_t offset, uint8_t *out, size_t length)
 {
+    uint8_t *read_buffer = io;
+    size_t capacity = sizeof(io);
+    if (datagram_cache) { read_buffer = datagram_cache; capacity = datagram_cache_bytes; }
     int ret = check_cancel(); if (ret) { return ret; }
     if (offset > file_length || length > file_length - offset) { return -EINVAL; }
     if (!cache_length || offset < cache_offset || offset + length > cache_offset + cache_length) {
-        ret = fs_seek(&file, offset, FS_SEEK_SET); if (ret) { return ret; }
+        uint64_t measured = dtls_profile_now();
+        ret = fs_seek(&file, offset, FS_SEEK_SET);
+        dtls_profile_add(DP_SD_SEEK, dtls_profile_now() - measured);
+        if (ret) { return ret; }
         cache_offset = offset; cache_length = 0;
-        uint32_t wanted = MIN(sizeof(io), file_length - offset);
+        uint32_t wanted = MIN(capacity, file_length - offset);
         while (cache_length < wanted) {
             ret = check_cancel(); if (ret) { return ret; }
-            ssize_t n = fs_read(&file, io + cache_length, wanted - cache_length);
+            measured = dtls_profile_now();
+            ssize_t n = fs_read(&file, read_buffer + cache_length, wanted - cache_length);
+            dtls_profile_add(DP_SD_READ, dtls_profile_now() - measured);
             if (n <= 0) { return n < 0 ? (int)n : -EIO; }
             cache_length += n;
         }
-    }
-    memcpy(out, io + offset - cache_offset, length);
+    } else { dtls_profile_add(DP_CACHE_HIT, 0); }
+    memcpy(out, read_buffer + offset - cache_offset, length);
     return 0;
 }
 static void datagram_progress(uint32_t sent, uint32_t received, uint32_t durable, uint32_t resumed)
@@ -835,12 +851,23 @@ static void datagram_progress(uint32_t sent, uint32_t received, uint32_t durable
 }
 static int send_datagram_file(const struct upload_file_record *stamp)
 {
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+    int configured = dtls_upload_set_window(datagram, datagram_initial_window, datagram_window_ceiling);
+    if (configured) { return configured; }
+#endif
+    /* Keep the existing hash buffer unchanged: vary only DATA read-ahead.
+     * Larger caches cost their full size in additional heap during a file. */
+    if (datagram_cache_bytes > sizeof(io)) {
+        datagram_cache = k_malloc(datagram_cache_bytes);
+        if (!datagram_cache) { return -ENOMEM; }
+    }
     struct dtls_upload_identity identity = {.device = device_id, .session = session,
         .credential = token, .segment = segment, .size = file_length};
     memcpy(identity.sha256, stamp->content_sha256, sizeof(identity.sha256));
     cache_length = 0;
     struct dtls_upload_stats statistics;
     int ret = dtls_upload_file(datagram, &identity, datagram_read, datagram_progress, &statistics);
+    k_free(datagram_cache); datagram_cache = NULL;
     k_mutex_lock(&control_lock, K_FOREVER); last_datagram = statistics;
     k_mutex_unlock(&control_lock);
     return ret;
@@ -1060,6 +1087,49 @@ K_THREAD_DEFINE(https_worker, 12288, worker, NULL, NULL, NULL, 7, 0, 0);
 K_THREAD_DEFINE(https_worker, 8192, worker, NULL, NULL, NULL, 7, 0, 0);
 #endif
 
+#if defined(CONFIG_CLIP_DTLS_UPLOAD) && defined(CONFIG_CLIP_DTLS_PROFILE)
+static int configure_datagram_cache(const char *args, char *response, size_t length)
+{
+    if (!args) { return -EINVAL; }
+    if (!strcmp(args, "cache,4")) { datagram_cache_bytes = 4096; }
+    else if (!strcmp(args, "cache,8")) { datagram_cache_bytes = 8192; }
+    else if (!strcmp(args, "cache,16")) { datagram_cache_bytes = 16384; }
+    else if (strcmp(args, "cache")) { return -EINVAL; }
+    int n = snprintf(response, length,
+        "{\"ok\":true,\"data\":{\"cache_kib\":%u}}\n", datagram_cache_bytes / 1024U);
+    return n < 0 || (size_t)n >= length ? -ENOSPC : n;
+}
+#endif
+
+#if defined(CONFIG_CLIP_DTLS_UPLOAD) && defined(CONFIG_CLIP_DTLS_PROFILE)
+/* RAM-only experiment settings, called under control_lock while idle. */
+static int configure_datagram_window(const char *args, char *response, size_t length)
+{
+    if (!args) { return -EINVAL; }
+    if (strcmp(args, "window")) {
+        if (strncmp(args, "window,", 7) || strlen(args + 7) >= 16) { return -EINVAL; }
+        char values[16]; strcpy(values, args + 7);
+        char *cursor = values;
+        unsigned int parsed[2] = {0};
+        for (unsigned int i = 0; i < 2; i++) {
+            const char *part = split_field(&cursor);
+            if (!part || !*part) { return -EINVAL; }
+            for (; *part; part++) {
+                if (*part < '0' || *part > '9') { return -EINVAL; }
+                parsed[i] = parsed[i] * 10U + (*part - '0');
+                if (parsed[i] > 128) { return -EINVAL; }
+            }
+        }
+        if (cursor || parsed[0] < 16 || parsed[0] > parsed[1]) { return -EINVAL; }
+        datagram_initial_window = parsed[0]; datagram_window_ceiling = parsed[1];
+    }
+    int n = snprintf(response, length,
+        "{\"ok\":true,\"data\":{\"initial_packets\":%u,\"ceiling_packets\":%u}}\n",
+        datagram_initial_window, datagram_window_ceiling);
+    return n < 0 || (size_t)n >= length ? -ENOSPC : n;
+}
+#endif
+
 static int configure_network(char *args)
 {
     char *split = strchr(args, ',');
@@ -1148,6 +1218,19 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
 #endif
 #ifdef CONFIG_CLIP_DTLS_UPLOAD
     if (!strcmp(ctx->name, "UPLOADNET")) {
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+        if (ctx->type == AT_CMD_TYPE_SET) {
+            if (https_poc_active() || https_poc_record_pending()) { ret = -EBUSY; goto reply; }
+            if (ctx->args && !strcmp(ctx->args, "timing")) {
+                return dtls_profile_format(&last_datagram.timing, response, length);
+            }
+            ret = ctx->args && !strncmp(ctx->args, "cache", 5) ?
+                configure_datagram_cache(ctx->args, response, length) :
+                configure_datagram_window(ctx->args, response, length);
+            if (ret >= 0) { return ret; }
+            goto reply;
+        }
+#endif
         return snprintf(response, length,
             "{\"ok\":true,\"data\":{\"protocol\":3,\"elapsed_ms\":%u,\"packets\":%u,"
             "\"retransmissions\":%u,\"receipts\":%u,\"received\":%u,\"durable\":%u,"
@@ -1279,7 +1362,11 @@ int https_poc_register(void)
         {"UPLOADSAVE", AT_CMD_EXEC, command}, {"UPLOADCLEAR", AT_CMD_EXEC, command},
         {"UPLOADCLOCK", AT_CMD_SET, command},
 #ifdef CONFIG_CLIP_DTLS_UPLOAD
-        {"UPLOADNET", AT_CMD_QUERY, command},
+        {"UPLOADNET", AT_CMD_QUERY
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+            | AT_CMD_SET
+#endif
+            , command},
 #endif
 #ifdef CONFIG_CLIP_TCP_TRACE
         {"TCPTRACE", AT_CMD_SET, command},

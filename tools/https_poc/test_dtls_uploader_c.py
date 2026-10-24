@@ -53,7 +53,12 @@ static int shim_poll(struct pollfd*p,nfds_t n,int timeout){return poll(p,n,timeo
 #define ZSOCK_POLLIN POLLIN
 #define ZSOCK_POLLOUT POLLOUT
 #define ZSOCK_POLLNVAL POLLNVAL
+#ifndef CONFIG_CLIP_DTLS_WINDOW_PACKETS
 #define CONFIG_CLIP_DTLS_WINDOW_PACKETS 64
+#endif
+#ifndef CONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS
+#define CONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS 16
+#endif
 #define k_calloc calloc
 #define k_free free
 #define PSA_SUCCESS 0
@@ -119,13 +124,29 @@ int main(int argc,char**argv){
  for(int i=0;i<32;i++){unsigned byte;assert(sscanf(argv[2]+i*2,"%2x",&byte)==1);id.sha256[i]=byte;}
  struct dtls_upload*c=NULL;struct dtls_upload_stats first,last;
  assert(!dtls_upload_open(&c,"127.0.0.1",argv[1],(const unsigned char*)"CA",3,check));
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+ assert(dtls_upload_set_window(NULL,16,64)==-EINVAL);
+ assert(dtls_upload_set_window(c,15,64)==-EINVAL);
+ assert(dtls_upload_set_window(c,128,64)==-EINVAL);
+ assert(dtls_upload_set_window(c,16,129)==-EINVAL);
+ assert(!dtls_upload_set_window(c,TEST_INITIAL_WINDOW,TEST_CEILING_WINDOW));
+#endif
  assert(dtls_upload_file(c,&id,read_data,notify,&first)==-ECANCELED);
  assert(saved>=65536 && saved<sizeof(data));dtls_upload_close(c);
  second=true;cancel_requested=false;
  assert(!dtls_upload_open(&c,"127.0.0.1",argv[1],(const unsigned char*)"CA",3,check));
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+ assert(!dtls_upload_set_window(c,TEST_INITIAL_WINDOW,TEST_CEILING_WINDOW));
+#endif
  assert(!dtls_upload_file(c,&id,read_data,notify,&last));
  assert(last.resume_from==saved && last.durable==sizeof(data) && last.received==sizeof(data));
  assert(first.retransmissions+last.retransmissions>=1);
+#ifdef CONFIG_CLIP_DTLS_PROFILE
+ assert(first.timing.valid && last.timing.valid);
+ assert(first.timing.source_calls && last.timing.source_calls);
+ assert(last.timing.tx_calls && last.timing.rx_calls && last.timing.poll_read_us);
+ assert(!last.timing.encrypt_calls); /* This fixture deliberately bypasses TLS. */
+#endif
  dtls_upload_close(c);
  printf("{\"resume\":%u,\"received\":%u,\"retries\":%u}\n",last.resume_from,last.received,first.retransmissions+last.retransmissions);
  return 0;
@@ -135,6 +156,18 @@ int main(int argc,char**argv){
 
 class ActualUploaderTest(unittest.TestCase):
     def test_actual_c_cancel_resume_repair_and_lost_complete(self):
+        self.run_sender(False)
+
+    def test_profiled_c_cancel_resume_repair_and_lost_complete(self):
+        self.run_sender(True)
+
+    def test_profiled_128_packet_window_with_loss_and_resume(self):
+        self.run_sender(True, 128, 128)
+
+    def test_unprofiled_128_packet_defaults_with_loss_and_resume(self):
+        self.run_sender(False, 128, 128)
+
+    def run_sender(self, profiled, initial=16, ceiling=64):
         with tempfile.TemporaryDirectory() as directory, socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
             root = Path(directory)
             store = ResumeStore(root, threading.Lock())
@@ -182,8 +215,31 @@ class ActualUploaderTest(unittest.TestCase):
             thread = threading.Thread(target=receiver, daemon=True)
             text = (ROOT / 'applications/clip/src/dtls_upload.c').read_text()
             source = '\n'.join(line for line in text.splitlines() if not line.startswith('#include'))
-            (root / 'client.c').write_text(SHIM + source + MAIN)
+            support = ''
+            if profiled:
+                support = r'''
+#define CONFIG_SYS_CLOCK_TICKS_PER_SEC 1000000U
+typedef void *atomic_ptr_t;
+static void *atomic_ptr_get(atomic_ptr_t *p){return *p;}
+static void atomic_ptr_set(atomic_ptr_t *p,void *v){*p=v;}
+static void atomic_ptr_clear(atomic_ptr_t *p){*p=NULL;}
+static void *k_current_get(void){return (void*)1;}
+static uint64_t k_uptime_ticks(void){struct timespec ts;assert(!clock_gettime(CLOCK_MONOTONIC,&ts));return (uint64_t)ts.tv_sec*1000000+ts.tv_nsec/1000;}
+static uint64_t k_ticks_to_us_floor64(uint64_t t){return t;}
+typedef int psa_status_t;
+typedef uint32_t mbedtls_svc_key_id_t;
+typedef uint32_t psa_algorithm_t;
+#define psa_aead_encrypt(...) 0
+#define psa_aead_decrypt(...) 0
+'''
+                text = (ROOT / 'applications/clip/src/dtls_profile.c').read_text()
+                support += '\n'.join(line for line in text.splitlines() if not line.startswith('#include'))
+            (root / 'client.c').write_text(SHIM + support + source + MAIN)
             subprocess.run(['clang', '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter',
+                            '-DCONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS='+str(initial),
+                            '-DCONFIG_CLIP_DTLS_WINDOW_PACKETS='+str(ceiling),
+                            *(['-DCONFIG_CLIP_DTLS_PROFILE=1', '-DTEST_INITIAL_WINDOW='+str(initial),
+                               '-DTEST_CEILING_WINDOW='+str(ceiling)] if profiled else []),
                             '-fsanitize=address,undefined', '-I', str(ROOT / 'applications/clip/include'),
                             str(root / 'client.c'), str(ROOT / 'applications/clip/src/upload_window.c'),
                             '-o', str(root / 'client')], check=True)
