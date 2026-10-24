@@ -19,6 +19,7 @@
 #include <stdarg.h>
 
 #include "storage.h"
+#include "recording_hash.h"
 
 LOG_MODULE_REGISTER(storage, CONFIG_CLIP_LOG_LEVEL);
 
@@ -645,6 +646,12 @@ int storage_write_chunk(const char *session_id, uint32_t chunk_index,
         return rc;
     }
 
+#ifdef CONFIG_CLIP_RECORDING_HASH
+    struct fs_dirent existing;
+    rc = fs_stat(filepath, &existing);
+    if (!rc) { return -EEXIST; }
+    if (rc != -ENOENT) { return rc; }
+#endif
     /* Open file for writing */
     fs_file_t_init(&file);
     rc = fs_open(&file, filepath, FS_O_CREATE | FS_O_WRITE);
@@ -675,7 +682,6 @@ int storage_write_chunk(const char *session_id, uint32_t chunk_index,
 /* Flush write buffer to SD card */
 static int flush_write_buffer(void)
 {
-    int rc;
     ssize_t written;
 
     if (buffer_pos == 0 || !current_file_ptr)
@@ -686,11 +692,14 @@ static int flush_write_buffer(void)
     written = fs_write(current_file_ptr, write_buffer, buffer_pos);
     if (written != buffer_pos)
     {
+        recording_hash_abort();
         LOG_ERR("Buffer flush incomplete: %zd != %u", written, buffer_pos);
         sd_full = true;
         return -EIO;
     }
 
+    int hash_error = recording_hash_update(write_buffer, buffer_pos);
+    if (hash_error) { LOG_WRN("Recording hash disabled: %d", hash_error); }
     buffer_pos = 0;
     return 0;
 }
@@ -717,6 +726,7 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint3
         }
         fs_close(current_file_ptr);
         current_file_ptr = NULL;
+        recording_hash_abort();
     }
 
     /* Initialize file structure */
@@ -738,6 +748,15 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint3
     }
     strncpy(file->filename, filename, sizeof(file->filename) - 1);
 
+#ifdef CONFIG_CLIP_RECORDING_HASH
+    /* Sealed content (and its caches) is immutable. Never overwrite a path
+     * left by an earlier recording, even if its new length might be equal. */
+    struct fs_dirent existing;
+    rc = fs_stat(filepath, &existing);
+    if (!rc) { return -EEXIST; }
+    if (rc != -ENOENT) { return rc; }
+#endif
+
     /* Open file */
     fs_file_t_init(&file->internal_file);
     LOG_INF("open: %s", filepath);
@@ -754,6 +773,8 @@ int storage_create_file(struct storage_file *file, const char *session_id, uint3
 
     /* Mark this file as being written for transfer coordination */
     storage_set_writing_file(session_id, filename);
+    rc = recording_hash_begin(session_id, chunk_index);
+    if (rc) { LOG_WRN("Recording hash unavailable: %d", rc); }
 
     LOG_INF("file: %s (chunk %u)", filepath, chunk_index);
     return 0;
@@ -826,9 +847,9 @@ int storage_write_frame(struct storage_file *file, const uint8_t *data, uint32_t
 
 int storage_close_file(struct storage_file *file)
 {
-    int rc;
+    int rc, error = 0;
 
-    if (!file || !file->is_open)
+    if (!file || !file->is_open || current_file_ptr != &file->internal_file)
     {
         return -EINVAL;
     }
@@ -840,6 +861,7 @@ int storage_close_file(struct storage_file *file)
         if (rc != 0)
         {
             LOG_ERR("Failed to flush buffer: %d", rc);
+            error = rc;
         }
     }
 
@@ -851,10 +873,20 @@ int storage_close_file(struct storage_file *file)
         if (rc != 0)
         {
             LOG_WRN("File sync failed: %d", rc);
+            if (!error) { error = rc; }
         }
 
-        fs_close(current_file_ptr);
+        rc = fs_close(current_file_ptr);
+        if (!error) { error = rc; }
         current_file_ptr = NULL;
+    }
+    buffer_pos = 0;
+    if (error) {
+        recording_hash_abort();
+    } else {
+        rc = recording_hash_end(file->session_id, file->chunk_index, file->bytes_written);
+        /* The recording is durable even if this optional cache cannot save. */
+        if (rc && rc != -ENOENT) { LOG_WRN("Recording hash not saved: %d", rc); }
     }
 
     /* Small delay to ensure file system has flushed data */
@@ -870,7 +902,7 @@ int storage_close_file(struct storage_file *file)
             file->filename, file->bytes_written, file->frames_written);
 
     file->is_open = false;
-    return 0;
+    return error;
 }
 
 int storage_read_chunk(const char *session_id, uint32_t chunk_index,

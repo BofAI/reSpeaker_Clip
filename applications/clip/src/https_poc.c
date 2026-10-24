@@ -35,6 +35,7 @@ BUILD_ASSERT(CONFIG_CLIP_DTLS_INITIAL_WINDOW_PACKETS <= CONFIG_CLIP_DTLS_WINDOW_
 #include "tcp_trace.h"
 #endif
 #include "upload_state.h"
+#include "recording_hash.h"
 #include "upload_config.h"
 #include "upload_scan.h"
 #include "wifi_diag.h"
@@ -89,6 +90,7 @@ static uint32_t failures, cursor_segment;
 static char cursor_session[15];
 #ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
 static char measurement_session[15];
+static bool measurement_fresh_hash;
 #endif
 static int64_t next_auto, time_synced_at;
 static atomic_val_t observed_activity;
@@ -939,18 +941,35 @@ static int upload_file(struct https_stream **stream)
         uint8_t destination[32];
         ret = destination_digest(destination);
         int loaded = ret ? ret : upload_state_load(session, segment, &cached);
-        bool fresh_hash = false;
+        bool fresh_hash = false, replay = false;
 #ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
-        fresh_hash = !strcmp(measurement_session, session);
+        replay = !strcmp(measurement_session, session);
+        fresh_hash = replay && measurement_fresh_hash;
 #endif
-        if (!ret && fresh_hash && (!loaded || loaded == -ENOENT || loaded == -EBADMSG)) { ret = hash_file(); }
-        else if (!ret && !loaded && cached.size == file_length &&
+        if (!ret && loaded && loaded != -ENOENT && loaded != -EBADMSG) { ret = loaded; }
+        if (!ret && !fresh_hash && !replay && !loaded && cached.size == file_length &&
             !memcmp(cached.destination_sha256, destination, sizeof(destination))) {
             /* Sealed segments are immutable. Reuse their CRC-protected hash;
              * final server SHA256 still detects SD corruption before COMPLETE. */
             digest_text(cached.content_sha256, expected_hash);
-        } else if (!ret && (loaded == -ENOENT || loaded == -EBADMSG || !loaded)) { ret = hash_file(); }
-        else if (!ret) { ret = loaded; }
+        } else if (!ret) {
+            uint8_t digest[32];
+            int content = fresh_hash ? -ENOENT : recording_hash_load(session, segment, file_length, digest);
+            if (!content) {
+                digest_text(digest, expected_hash);
+                upload_perf_add(UP_RECORD_HASH_HITS, 1);
+            } else {
+                /* Disposable metadata must never prevent a legacy recording
+                 * from uploading. Hash the actual sealed bytes on any miss. */
+                ret = hash_file();
+                if (!ret) {
+                    digest_bytes(expected_hash, digest);
+                    uint64_t measured = upload_perf_now();
+                    (void)recording_hash_save(session, segment, file_length, digest);
+                    upload_perf_add(UP_RECORD_HASH_SAVE_US, upload_perf_now() - measured);
+                }
+            }
+        }
 #else
         ret = hash_file();
 #endif
@@ -1261,13 +1280,16 @@ static int command_locked(struct at_cmd_ctx *ctx, char *response, size_t length)
         if (ctx->type == AT_CMD_TYPE_SET) {
             if (https_poc_active() || https_poc_record_pending()) { ret = -EBUSY; goto reply; }
 #ifdef CONFIG_CLIP_DTLS_PREPARE_MEASURE
-            if (ctx->args && !strncmp(ctx->args, "measure,", 8)) {
-                const char *id = ctx->args + 8;
+            if (ctx->args && (!strncmp(ctx->args, "measure,", 8) || !strncmp(ctx->args, "measure-cache,", 14))) {
+                bool fresh = !strncmp(ctx->args, "measure,", 8);
+                const char *id = ctx->args + (fresh ? 8 : 14);
                 if (settings.enabled || clip_event_get_state() != CLIP_STATE_IDLE) { ret = -EBUSY; goto reply; }
                 if (!valid_session(id)) { ret = -EINVAL; goto reply; }
                 strcpy(measurement_session, id);
+                measurement_fresh_hash = fresh;
                 return snprintf(response, length,
-                    "{\"ok\":true,\"data\":{\"measure_session\":\"%s\",\"fresh_hash\":true,\"one_pass\":true}}\n", id);
+                    "{\"ok\":true,\"data\":{\"measure_session\":\"%s\",\"fresh_hash\":%s,\"one_pass\":true}}\n",
+                    id, fresh ? "true" : "false");
             }
 #endif
             if (ctx->args && !strcmp(ctx->args, "timing")) {

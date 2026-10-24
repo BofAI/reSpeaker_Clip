@@ -20,6 +20,7 @@ class BatchWorkerTest(unittest.TestCase):
 #include <errno.h>
 #include <setjmp.h>
 #include "upload_state.h"
+#include "recording_hash.h"
 #define ARG_UNUSED(x) (void)(x)
 #define K_SECONDS(x) (x)
 #define K_MSEC(x) (x)
@@ -166,3 +167,24 @@ static void clip_cpu_boost_release(void){assert(boosts==1);boosts--;}
         for mode in [0, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]:
             with self.subTest(mode=mode):
                 compile_run(code, [str(mode)])
+        # Exercise the actual upload decision: recording cache hit avoids data
+        # reads; missing/corrupt/I/O-failed cache falls back, save failure is optional.
+        for error in (0, '-ENOENT', '-EBADMSG', '-EIO'):
+            adapter = r'''
+static int record_reads,record_saves;
+int recording_hash_load(const char*s,uint32_t n,uint32_t z,uint8_t d[32]){
+ assert(!strcmp(s,session)&&n==segment&&z==file_length);record_reads++;memset(d,0xaa,32);return CACHE_ERROR;
+}
+int recording_hash_save(const char*s,uint32_t n,uint32_t z,const uint8_t d[32]){
+ assert(!strcmp(s,session)&&n==segment&&z==file_length&&d[0]==0xaa);record_saves++;return -EIO;
+}
+'''
+            cached = code.replace('static int upload_file(', adapter+'\nstatic int upload_file(', 1)
+            cached = cached.replace('static int hash_file(void){assert(file.open);return 0;}',
+                                    'static int hash_file(void){assert(file.open);hash_calls++;return 0;}')
+            cached = cached.replace('assert(connections==disconnects);return 0;',
+                                    'assert(connections==disconnects);assert(record_reads==3);'
+                                    'assert(hash_calls==(CACHE_ERROR?3:0));assert(record_saves==(CACHE_ERROR?3:0));return 0;')
+            cached = '#define CONFIG_CLIP_RECORDING_HASH 1\n#define CACHE_ERROR '+str(error)+'\nstatic int hash_calls;\n'+cached
+            with self.subTest(cache_error=error):
+                compile_run(cached, ['0'])

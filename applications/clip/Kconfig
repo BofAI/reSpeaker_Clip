@@ -31,6 +31,15 @@ config CLIP_DTLS_PROFILE
 	  Measure source reads, AEAD, UDP calls and explicit waits in RAM.
 	  Uses pinned build-local TLS source instrumentation, with no log output.
 
+config CLIP_RECORDING_HASH
+	bool "Cache sealed recording SHA-256 while writing"
+	depends on CLIP_DTLS_UPLOAD
+	default y
+	help
+	  Incrementally hash successful recording writes, including frame headers.
+	  Publish CRC-protected content metadata only after data sync and close.
+	  Uploads without valid metadata retain the full-file hashing fallback.
+
 config CLIP_DTLS_WINDOW_PACKETS
 	int "Maximum logical DTLS in-flight packets"
 	depends on CLIP_DTLS_UPLOAD
